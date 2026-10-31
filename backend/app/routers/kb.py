@@ -668,10 +668,18 @@ async def get_kb_presentation(node_id: str):
     # Not in cache, so we generate using presenter_agent
     from app.agents.presenter import presenter_agent, Presentation, Slide
     from app.agents.deps import AgentDeps
-    from app.db.chroma_client import get_chroma_client
+    from app.schemas.profile import StudentProfile
     import asyncio
-    
-    chroma_client = get_chroma_client()
+
+    try:
+        import chromadb
+        chroma_client = chromadb.HttpClient(
+            host=os.getenv("CHROMA_HOST", "localhost"),
+            port=int(os.getenv("CHROMA_PORT", "8001"))
+        )
+    except Exception as e:
+        print(f"Warning: Chroma client failed in kb presentation endpoint: {e}")
+        chroma_client = None
     
     # We call presenter agent
     try:
