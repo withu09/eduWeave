@@ -1,0 +1,108 @@
+services:
+  eduweave-redis:
+    image: redis:7-alpine
+    container_name: eduweave-redis
+    ports:
+      - "6390:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - eduweave-net
+
+  eduweave-chroma:
+    image: chromadb/chroma:0.5.4
+    container_name: eduweave-chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/data
+    networks:
+      - eduweave-net
+
+  eduweave-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: eduweave-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://eduweave-redis:6379/0
+      - CHROMA_HOST=eduweave-chroma
+      - CHROMA_PORT=8000
+      - XUNFEI_SPARK_APP_ID=${XUNFEI_SPARK_APP_ID}
+      - XUNFEI_SPARK_API_KEY=${XUNFEI_SPARK_API_KEY}
+      - XUNFEI_SPARK_API_SECRET=${XUNFEI_SPARK_API_SECRET}
+      - XUNFEI_SPARK_BASE_URL=${XUNFEI_SPARK_BASE_URL}
+      - XUNFEI_SPARK_MODEL=${XUNFEI_SPARK_MODEL}
+      - DATABASE_URL=postgresql+psycopg2://postgres:password@eduweave-postgres:5432/eduweave
+    depends_on:
+      - eduweave-redis
+      - eduweave-chroma
+      - eduweave-postgres
+    networks:
+      - eduweave-net
+
+  eduweave-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: eduweave-worker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://eduweave-redis:6379/0
+      - CHROMA_HOST=eduweave-chroma
+      - CHROMA_PORT=8000
+      - XUNFEI_SPARK_APP_ID=${XUNFEI_SPARK_APP_ID}
+      - XUNFEI_SPARK_API_KEY=${XUNFEI_SPARK_API_KEY}
+      - XUNFEI_SPARK_API_SECRET=${XUNFEI_SPARK_API_SECRET}
+      - XUNFEI_SPARK_BASE_URL=${XUNFEI_SPARK_BASE_URL}
+      - XUNFEI_SPARK_MODEL=${XUNFEI_SPARK_MODEL}
+      - DATABASE_URL=postgresql+psycopg2://postgres:password@eduweave-postgres:5432/eduweave
+    depends_on:
+      - eduweave-redis
+      - eduweave-chroma
+      - eduweave-postgres
+    networks:
+      - eduweave-net
+
+  eduweave-front:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: eduweave-front
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - eduweave-api
+    networks:
+      - eduweave-net
+
+  eduweave-postgres:
+    image: postgres:15-alpine
+    container_name: eduweave-postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=eduweave
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - eduweave-net
+
+networks:
+  eduweave-net:
+    driver: bridge
+
+volumes:
+  redis_data:
+  chroma_data:
+  postgres_data:

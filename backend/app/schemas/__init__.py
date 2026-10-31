@@ -1,0 +1,1 @@
+# EduWeave AI Schemas package
