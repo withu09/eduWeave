@@ -61,7 +61,22 @@ def get_datasets(page=1, limit=100):
 
 
 def create_dataset(name, description=""):
-    result = request("POST", "/datasets", json={"name": name, "description": description, "permission": "only_me", "indexing_technique": "economy"})
+    result = request(
+        "POST",
+        "/datasets",
+        json={
+            "name": name,
+            "description": description,
+            "permission": "only_me",
+            "indexing_technique": "economy",
+            "retrieval_model": {
+                "search_method": "keyword_search",
+                "reranking_enable": False,
+                "top_k": 4,
+                "score_threshold_enabled": False,
+            },
+        },
+    )
     if not result.get("id"):
         raise DifyError("Dify 未返回知识库编号，课程尚未关联")
     return result["id"]
