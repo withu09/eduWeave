@@ -21,7 +21,15 @@ function saveNotes(notes: Note[]) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(notes)); } catch { /* ignore */ }
 }
 
-const DEFAULT_CHAPTERS = ["核心概念", "线性结构", "链式结构", "树形结构", "散列", "图论", "算法策略"];
+const DEFAULT_CHAPTERS = [
+  "供求与弹性",
+  "消费者与生产者理论",
+  "市场结构与博弈论",
+  "一般均衡与市场失灵",
+  "唯物论与辩证法",
+  "认识论与唯物史观",
+  "马克思主义政治经济学",
+];
 
 // ─── 笔记编辑 Modal ───────────────────────────────────────────────────────────
 function NoteModal({

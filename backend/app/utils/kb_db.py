@@ -238,8 +238,9 @@ def update_tree_node(node_id: str, title: str) -> str:
 
 import json
 
-def _build_starmap_nodes_for_course(course: Course) -> List[dict]:
+def _build_starmap_nodes_for_course(course: Course, stats_map: dict | None = None) -> List[dict]:
     starmap_nodes = []
+    stats_map = stats_map or {}
     # Emit Course as a super-hub node
     starmap_nodes.append({
         'id': course.id,
@@ -271,13 +272,14 @@ def _build_starmap_nodes_for_course(course: Course) -> List[dict]:
         
         # Emit Nodes linked to the Module
         for node in mod.nodes:
+            st, m_val = stats_map.get(node.id, ('unlocked', 0))
             starmap_nodes.append({
                 'id': node.id,
                 'title': node.title,
                 'subtitle': 'Node',
                 'chapter': mod.title,
-                'status': 'unlocked',
-                'mastery': 0,
+                'status': st,
+                'mastery': m_val,
                 'type': 'node',
                 'x': node.x if node.x is not None else 0,
                 'y': node.y if node.y is not None else 0,
@@ -285,13 +287,36 @@ def _build_starmap_nodes_for_course(course: Course) -> List[dict]:
             })
     return starmap_nodes
 
+
+def _compute_node_stats(db) -> dict:
+    from app.db.models import LearningAnswer
+    from collections import defaultdict
+    rows = db.query(LearningAnswer).order_by(LearningAnswer.created_at, LearningAnswer.id).all()
+    by_node = defaultdict(list)
+    for r in rows:
+        by_node[r.node_id].append(r)
+    stats = {}
+    for nid, history in by_node.items():
+        recent = history[-5:]
+        correct = sum(a.correct for a in recent)
+        acc = round(100 * correct / len(recent)) if recent else 0
+        if len(recent) >= 3 and correct / len(recent) >= 0.8:
+            stats[nid] = ('mastered', acc)
+        elif recent and (not recent[-1].correct or correct / len(recent) < 0.6):
+            stats[nid] = ('weakness', acc)
+        else:
+            stats[nid] = ('unlocked', acc)
+    return stats
+
+
 def get_starmap_nodes(course_id: str) -> List[dict]:
     db = SessionLocal()
     try:
         course = db.query(Course).filter(Course.id == course_id).first()
         if not course:
             return []
-        return _build_starmap_nodes_for_course(course)
+        stats_map = _compute_node_stats(db)
+        return _build_starmap_nodes_for_course(course, stats_map)
     finally:
         db.close()
 
@@ -299,9 +324,10 @@ def get_all_starmap_nodes() -> List[dict]:
     db = SessionLocal()
     try:
         courses = db.query(Course).all()
+        stats_map = _compute_node_stats(db)
         all_nodes = []
         for course in courses:
-            all_nodes.extend(_build_starmap_nodes_for_course(course))
+            all_nodes.extend(_build_starmap_nodes_for_course(course, stats_map))
         return all_nodes
     finally:
         db.close()

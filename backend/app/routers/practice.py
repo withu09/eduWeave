@@ -82,13 +82,18 @@ async def get_practice(node_id: str, learner_id: Learner, subject: Subject | Non
         if subject:
             query = query.filter_by(subject=subject)
         record = query.order_by(PracticeRecord.created_at.desc()).first()
+        if record is None:
+            seed_q = db.query(PracticeRecord).filter_by(learner_id="seed_template", node_id=node_id)
+            if subject:
+                seed_q = seed_q.filter_by(subject=subject)
+            record = seed_q.order_by(PracticeRecord.created_at.desc()).first()
         selected = subject or (record.subject if record else suggested_subject(context))
         payload = record_payload(record) if record else None
     if payload:
         version = payload["exercise"].get("source_version")
         if not version:
             payload = None
-        else:
+        elif version != "*":
             material = await node_materials(node_id)
             if material["source_version"] != version:
                 payload = None

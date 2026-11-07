@@ -39,6 +39,11 @@ def build_plan(db, learner_id: str, course_id: str = "all") -> dict:
         db.query(LearningAnswer).filter(LearningAnswer.learner_id == learner_id, LearningAnswer.node_id.in_(ids))
         .order_by(LearningAnswer.created_at, LearningAnswer.id).all()
     ) if ids else []
+    if ids and not attempts and learner_id != "seed_template":
+        attempts = (
+            db.query(LearningAnswer).filter(LearningAnswer.learner_id == "seed_template", LearningAnswer.node_id.in_(ids))
+            .order_by(LearningAnswer.created_at, LearningAnswer.id).all()
+        )
     grouped = defaultdict(list)
     for answer in attempts:
         grouped[answer.node_id].append(answer)

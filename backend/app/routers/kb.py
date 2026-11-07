@@ -8,7 +8,8 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+import html as html_lib
 from pydantic import BaseModel, Field
 
 from app.agents.deps import AgentDeps
@@ -295,14 +296,101 @@ async def push_to_dify(node_id: str, document_id: str):
     return await save_upload(path.read_bytes(), filename, course_id, node_id, document_id)
 
 
+def _render_md_html(title: str, md_text: str) -> str:
+    lines = md_text.splitlines()
+    out = []
+    in_list = False
+    for raw in lines:
+        line = html_lib.escape(raw.strip())
+        if not line:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            continue
+        if line == "---":
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append("<hr/>")
+            continue
+        line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
+        if line.startswith("# "):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f"<h1>{line[2:]}</h1>")
+        elif line.startswith("## "):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f"<h2>{line[3:]}</h2>")
+        elif line.startswith("### "):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f"<h3>{line[4:]}</h3>")
+        elif line.startswith("- ") or re.match(r"^\d+\.\s+", line):
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            item = re.sub(r"^(?:-\s+|\d+\.\s+)", "", line)
+            out.append(f"<li>{item}</li>")
+        else:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f"<p>{line}</p>")
+    if in_list:
+        out.append("</ul>")
+    body = "\n".join(out)
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<title>{html_lib.escape(title)}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body, {{delimiters:[{{left:'$$',right:'$$',display:true}},{{left:'$',right:'$',display:false}}]}});"></script>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #0b0e1f; color: #e4e8ff; line-height: 1.75; padding: 28px 36px; margin: 0; }}
+  .badge {{ display: inline-block; background: rgba(139,125,255,0.18); color: #b5a8ff; border: 1px solid rgba(139,125,255,0.35); border-radius: 999px; font-size: 12px; padding: 3px 12px; margin-bottom: 12px; }}
+  h1 {{ font-size: 22px; color: #ffffff; border-bottom: 1px solid rgba(140,150,220,0.22); padding-bottom: 10px; margin-top: 24px; }}
+  h2 {{ font-size: 17px; color: #9ec5ff; margin-top: 20px; }}
+  h3 {{ font-size: 15px; color: #c7d2fe; margin-top: 16px; }}
+  p, li {{ font-size: 14px; color: #d5dbf8; }}
+  ul {{ padding-left: 22px; }}
+  li {{ margin-bottom: 6px; }}
+  strong {{ color: #ffd485; }}
+  hr {{ border: none; border-top: 1px dashed rgba(140,150,220,0.25); margin: 24px 0; }}
+</style>
+</head>
+<body>
+  <div class="badge">Dify 云端权威教材切片 · 溯源讲义</div>
+  {body}
+</body>
+</html>"""
+
+
 @router.get("/api/kb/download/{resource_id}")
-async def download_kb_document(resource_id: str):
+async def download_kb_document(resource_id: str, raw: int = 0):
     with kb_db.SessionLocal() as db:
         resource = db.query(kb_db.Resource).filter_by(dify_document_id=resource_id).first()
         if resource is None:
             raise HTTPException(404, "资料不存在")
         filename = resource.name
+        dataset_id = resource.node.module.course.dify_dataset_id if resource.node and resource.node.module and resource.node.module.course else None
     path = stored_file(resource_id)
+    if path is not None and path.suffix.lower() in {".md", ".txt"} and not raw:
+        return HTMLResponse(_render_md_html(filename, path.read_text(encoding="utf-8")))
+    if path is None and dataset_id and dify.configured() and is_remote(resource_id):
+        try:
+            segs = await asyncio.to_thread(dify.get_segments, dataset_id, resource_id, limit=100)
+            text = "\n\n".join(s.get("content", "") for s in segs.get("data", []) if s.get("content"))
+            if text:
+                return HTMLResponse(_render_md_html(filename, text))
+        except Exception:
+            pass
     if path is None:
         raise HTTPException(404, "本地源文件缺失")
     return FileResponse(path, filename=filename, media_type=mimetypes.guess_type(filename)[0] or "application/octet-stream", content_disposition_type="inline")
@@ -349,14 +437,16 @@ def content_cache_path():
 
 
 async def generate_content(node_id, kind, more=False):
-    material = await node_materials(node_id)
     path = content_cache_path()
     try:
         cache = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except (ValueError, OSError):
         cache = {}
     entry = cache.get(node_id, {})
-    if entry.get("source_version") != material["source_version"]:
+    if entry.get("source_version") == "*" and entry.get(kind) and not more:
+        return {kind: entry[kind], "sources": entry.get("sources", []), "source_version": "*"}
+    material = await node_materials(node_id)
+    if entry.get("source_version") not in {material["source_version"], "*"}:
         entry = {}
     if entry.get(kind) and not more:
         return {kind: entry[kind], "sources": material["sources"], "source_version": material["source_version"]}

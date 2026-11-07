@@ -123,11 +123,11 @@ export const agents: AgentInfo[] = [
 ];
 
 export const thoughtStream = [
-  { agent: "Director", text: "解析学生请求：单链表反转持续做错，触发薄弱点重规划。", t: "12:04:02" },
-  { agent: "Profiler", text: "更新 student_profile.weaknesses += ['linked_list_reverse']", t: "12:04:03" },
-  { agent: "Director", text: "路由：节点 n3 渐变为粉红巨星，分发任务 → Writer / Examiner。", t: "12:04:03" },
-  { agent: "Writer", text: "RAG 检索《数据结构》ch2 切片 7 / 12，开始流式生成讲义…", t: "12:04:05" },
-  { agent: "Media", text: "基于 Writer 文档生成指针漫游动画脚本，进度 70%。", t: "12:04:09" },
+  { agent: "Director", text: "解析学生请求：对「需求、供给与均衡价格」及弹性判据掌握不牢，触发薄弱点路径规划。", t: "12:04:02" },
+  { agent: "Profiler", text: "更新 student_profile.weak_nodes += ['需求价格弹性与总收益']，mastery = 0.45", t: "12:04:03" },
+  { agent: "Director", text: "路由：依次调用 recommend_plan 与 search_knowledge_base，分发任务 → Writer / Examiner。", t: "12:04:03" },
+  { agent: "Writer", text: "RAG 检索 Dify《微观经济学》第2章切片 [资料1][资料2]，生成结构化讲义与导图…", t: "12:04:05" },
+  { agent: "Examiner", text: "基于教材切片命制 4 道弹性与均衡价格分层巩固题，已写入指纹缓存。", t: "12:04:08" },
 ];
 
 export const tokenUsage = [
@@ -179,10 +179,42 @@ export interface Note {
 }
 
 export const notes: Note[] = [
-  { id: "no1", title: "链表反转的三指针心法", excerpt: "prev/cur/next 三指针逐位翻转，关键在于先存 next 再断链，避免丢失后继。", date: "2026-06-14", chapter: "链式结构", tags: ["AI整理", "易错点"] },
-  { id: "no2", title: "快慢指针判环", excerpt: "Floyd 判圈：快指针每次走两步，慢指针一步，相遇即有环，空间 O(1)。", date: "2026-06-13", chapter: "链式结构", tags: ["技巧"] },
-  { id: "no3", title: "栈的链式实现要点", excerpt: "头插法入栈出栈均 O(1)，无需扩容，注意空栈判断。", date: "2026-06-11", chapter: "线性结构", tags: ["实操"] },
-  { id: "no4", title: "递归与迭代的等价转换", excerpt: "递归本质是系统栈，可用显式栈改写为迭代以避免栈溢出。", date: "2026-06-09", chapter: "算法策略", tags: ["AI整理", "进阶"] },
+  {
+    id: "no1",
+    title: "需求价格弹性与总收益关系（薄利多销判据）",
+    excerpt:
+      "需求价格弹性 $E_d = -\\frac{dQ}{dP}\\cdot\\frac{P}{Q}$ 决定了调价对总收益 $TR = P \\times Q$ 的影响：\n1. **富有弹性（$E_d > 1$）**：如家电、餐饮，降价使销量增幅大于单价降幅，总收益增加，适用**薄利多销**；\n2. **缺乏弹性（$0 < E_d < 1$）**：如粮食、胰岛素等必需品，降价导致总收益减少（**谷贱伤农**），不宜降价促销。",
+    date: "2026-11-07",
+    chapter: "供求与弹性",
+    tags: ["AI整理", "高频考点", "微观经济学"],
+  },
+  {
+    id: "no2",
+    title: "基数效用与序数效用下的消费者均衡条件对比",
+    excerpt:
+      "在预算约束 $P_X X + P_Y Y = I$ 下，两种效用理论导出的消费者均衡本质一致：\n- **基数效用论（等边际法则）**：$\\frac{MU_X}{P_X} = \\frac{MU_Y}{P_Y} = \\lambda$（每元支出带来的边际效用相等）；\n- **序数效用论（相切条件）**：$MRS_{XY} = \\frac{MU_X}{MU_Y} = \\frac{P_X}{P_Y}$（无差异曲线斜率等于预算线斜率）。",
+    date: "2026-11-06",
+    chapter: "消费者与生产者理论",
+    tags: ["公式推导", "易错点", "微观经济学"],
+  },
+  {
+    id: "no3",
+    title: "完全竞争厂商短期停止营业点与三级价格歧视",
+    excerpt:
+      "1. **短期停止营业点**：当市场价格 $P = AVC_{\\min}$ 时为停止营业点；若 $AVC_{\\min} < P < SAC$，厂商虽亏损但仍继续生产以分摊固定成本 $TFC$。\n2. **三级价格歧视定价公式**：$P_1(1 - \\frac{1}{E_{d1}}) = P_2(1 - \\frac{1}{E_{d2}}) = MC$，在弹性小的市场定高价，弹性大的市场定低价。",
+    date: "2026-11-05",
+    chapter: "市场结构与博弈论",
+    tags: ["AI整理", "计算必考", "微观经济学"],
+  },
+  {
+    id: "no4",
+    title: "矛盾的普遍性与特殊性辩证关系（马原核心考点）",
+    excerpt:
+      "矛盾的普遍性（共性、绝对）与特殊性（个性、相对）是**关于事物矛盾问题的精髓**：\n- 共性寓于个性之中，没有离开个性的共性，也没有离开共性的个性；\n- 方法论上坚持**具体问题具体分析（马克思主义活的灵魂）**，这也是推进马克思主义中国化时代化的哲学根基。",
+    date: "2026-11-04",
+    chapter: "唯物论与辩证法",
+    tags: ["核心原理", "论述题模板", "马原"],
+  },
 ];
 
 export interface RecommendedResource {
@@ -270,5 +302,5 @@ export const communityPosts: CommunityPost[] = [
 ];
 
 export const copilotSeed = [
-  { role: "agent" as const, agent: "答疑 Agent", text: "你好！我注意到你在「单链表反转」反复出错。要不要我用三指针动画帮你拆解一遍？" },
+  { role: "agent" as const, agent: "AI 伴学", text: "你好！我已同步 Dify 云端《微观经济学》与《马克思主义基本原理》教材知识库。你可以随时点击下方快捷胶囊规划学习路径、检索教材原文或针对薄弱点出题练习。" },
 ];

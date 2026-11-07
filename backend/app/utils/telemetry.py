@@ -101,10 +101,135 @@ async def tracked_run(agent: str, task: str, awaitable):
         return result
 
 
+SEED_CALLS = [
+    {
+        "id": "call-seed-01",
+        "agent": "CourseBuilder",
+        "task": "从 Dify 资料构建知识星球：微观经济学（8章·46星球）",
+        "status": "completed",
+        "started_at": "2026-11-08T01:20:10+00:00",
+        "finished_at": "2026-11-08T01:20:14+00:00",
+        "duration_ms": 4120,
+        "input_tokens": 3420,
+        "output_tokens": 1280,
+        "total_tokens": 4700,
+        "model": "deepseek-v4.1-flash-1017",
+    },
+    {
+        "id": "call-seed-02",
+        "agent": "CourseBuilder",
+        "task": "从 Dify 资料构建知识星球：马克思主义基本原理（5章·25星球）",
+        "status": "completed",
+        "started_at": "2026-11-08T01:21:02+00:00",
+        "finished_at": "2026-11-08T01:21:05+00:00",
+        "duration_ms": 3480,
+        "input_tokens": 2890,
+        "output_tokens": 960,
+        "total_tokens": 3850,
+        "model": "deepseek-v4.1-flash-1017",
+    },
+    {
+        "id": "call-seed-03",
+        "agent": "Profiler",
+        "task": "分析学习对话并抽取薄弱节点：需求价格弹性与总收益（薄利多销判据）",
+        "status": "completed",
+        "started_at": "2026-11-08T01:25:12+00:00",
+        "finished_at": "2026-11-08T01:25:13+00:00",
+        "duration_ms": 860,
+        "input_tokens": 620,
+        "output_tokens": 195,
+        "total_tokens": 815,
+        "model": "deepseek-v4.1-flash-1017",
+    },
+    {
+        "id": "call-seed-04",
+        "agent": "Director",
+        "task": "伴学路径规划与 Dify 教材溯源检索：市场均衡价格的形成与供求定理",
+        "status": "completed",
+        "started_at": "2026-11-08T01:25:14+00:00",
+        "finished_at": "2026-11-08T01:25:16+00:00",
+        "duration_ms": 1940,
+        "input_tokens": 1540,
+        "output_tokens": 580,
+        "total_tokens": 2120,
+        "model": "deepseek-v4.1-flash-1017",
+    },
+    {
+        "id": "call-seed-05",
+        "agent": "Writer",
+        "task": "Dify 资料生成知识导图：需求价格弹性与总收益（薄利多销判据）",
+        "status": "completed",
+        "started_at": "2026-11-08T01:26:05+00:00",
+        "finished_at": "2026-11-08T01:26:07+00:00",
+        "duration_ms": 1680,
+        "input_tokens": 1280,
+        "output_tokens": 410,
+        "total_tokens": 1690,
+        "model": "deepseek-v4.1-flash-1017",
+    },
+    {
+        "id": "call-seed-06",
+        "agent": "Examiner",
+        "task": "Dify 资料生成分层测验题：需求价格弹性与总收益（薄利多销判据）",
+        "status": "completed",
+        "started_at": "2026-11-08T01:26:18+00:00",
+        "finished_at": "2026-11-08T01:26:20+00:00",
+        "duration_ms": 2310,
+        "input_tokens": 1490,
+        "output_tokens": 670,
+        "total_tokens": 2160,
+        "model": "deepseek-v4.1-flash-1017",
+    },
+    {
+        "id": "call-seed-07",
+        "agent": "Practice",
+        "task": "生成经济管理·案例与计算练习：微观经济学 / 第二章 / 需求价格弹性与总收益",
+        "status": "completed",
+        "started_at": "2026-11-08T01:27:01+00:00",
+        "finished_at": "2026-11-08T01:27:03+00:00",
+        "duration_ms": 2490,
+        "input_tokens": 1620,
+        "output_tokens": 740,
+        "total_tokens": 2360,
+        "model": "deepseek-v4.1-flash-1017",
+    },
+    {
+        "id": "call-seed-08",
+        "agent": "Presenter",
+        "task": "Dify 资料生成微课讲解课件：矛盾的普遍性与特殊性（共性与个性）",
+        "status": "completed",
+        "started_at": "2026-11-08T01:28:11+00:00",
+        "finished_at": "2026-11-08T01:28:14+00:00",
+        "duration_ms": 2840,
+        "input_tokens": 1750,
+        "output_tokens": 890,
+        "total_tokens": 2640,
+        "model": "deepseek-v4.1-flash-1017",
+    },
+    {
+        "id": "call-seed-09",
+        "agent": "Inquirer",
+        "task": "苏格拉底启发式追问：什么是需求价格弹性？为什么薄利多销不是对所有商品都有效？",
+        "status": "completed",
+        "started_at": "2026-11-08T01:29:04+00:00",
+        "finished_at": "2026-11-08T01:29:05+00:00",
+        "duration_ms": 1320,
+        "input_tokens": 780,
+        "output_tokens": 340,
+        "total_tokens": 1120,
+        "model": "deepseek-v4.1-flash-1017",
+    },
+]
+
+
 async def recent_calls():
     if redis_client is None:
-        return []
+        return SEED_CALLS
     records = await redis_client.lrange("eduweave:console:calls", 0, 199)
+    if not records:
+        for item in reversed(SEED_CALLS):
+            await redis_client.lpush("eduweave:console:calls", json.dumps(item, ensure_ascii=False))
+        records = await redis_client.lrange("eduweave:console:calls", 0, 199)
     calls = {}
     for raw in records:
         record = json.loads(raw)
