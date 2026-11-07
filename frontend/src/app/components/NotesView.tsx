@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { NotebookPen, Calendar, Network, Tag, Sparkles, FileQuestion, Plus, Pencil, Trash2, X, Eye, Check } from "lucide-react";
 import { notes as seedNotes, type Note } from "../data";
+import { useStudyStore } from "../store";
 import { Markdown } from "./Markdown";
 
 type Tab = "timeline" | "graph" | "tags";
@@ -20,20 +21,22 @@ function saveNotes(notes: Note[]) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(notes)); } catch { /* ignore */ }
 }
 
-const CHAPTERS = ["线性结构", "链式结构", "树形结构", "散列", "图论", "算法策略"];
+const DEFAULT_CHAPTERS = ["核心概念", "线性结构", "链式结构", "树形结构", "散列", "图论", "算法策略"];
 
 // ─── 笔记编辑 Modal ───────────────────────────────────────────────────────────
 function NoteModal({
   initial,
+  chapters,
   onSave,
   onClose,
 }: {
   initial?: Note;
+  chapters: string[];
   onSave: (note: Note) => void;
   onClose: () => void;
 }) {
   const [title, setTitle] = useState(initial?.title ?? "");
-  const [chapter, setChapter] = useState(initial?.chapter ?? CHAPTERS[0]);
+  const [chapter, setChapter] = useState(initial?.chapter ?? chapters[0] ?? "核心概念");
   const [tagInput, setTagInput] = useState((initial?.tags ?? []).join(" "));
   const [body, setBody] = useState(initial?.excerpt ?? "");
   const [preview, setPreview] = useState(false);
@@ -89,7 +92,7 @@ function NoteModal({
             onChange={(e) => setChapter(e.target.value)}
             className="flex-1 rounded-xl border border-border bg-input-background px-3 py-2 text-[13px] text-foreground outline-none focus:border-[var(--primary)]"
           >
-            {CHAPTERS.map((c) => <option key={c} value={c}>{c}</option>)}
+            {chapters.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
           <input
             value={tagInput}
@@ -146,10 +149,26 @@ function NoteModal({
 }
 
 // ─── 主视图 ───────────────────────────────────────────────────────────────────
-export function NotesView() {
+export function NotesView({ onAskAI }: { onAskAI?: (prompt: string) => void }) {
   const [notes, setNotes] = useState<Note[]>(loadNotes);
   const [tab, setTab] = useState<Tab>("timeline");
   const [modal, setModal] = useState<{ mode: "new" | "edit"; note?: Note } | null>(null);
+  const constellation = useStudyStore((state) => state.constellation);
+
+  useEffect(() => {
+    const refresh = () => setNotes(loadNotes());
+    window.addEventListener("eduweave-notes-updated", refresh);
+    return () => window.removeEventListener("eduweave-notes-updated", refresh);
+  }, []);
+
+  const dynamicChapters = Array.from(
+    new Set([
+      ...constellation.filter((n) => n.type === "module").map((n) => n.title),
+      ...constellation.filter((n) => n.type === "node" && n.chapter).map((n) => n.chapter),
+      ...DEFAULT_CHAPTERS,
+    ])
+  );
+  const courseTitle = constellation.find((n) => n.type === "course")?.title || "知识星系";
 
   const persist = (next: Note[]) => { setNotes(next); saveNotes(next); };
 
@@ -165,6 +184,22 @@ export function NotesView() {
   const handleDelete = (id: string) => {
     if (!window.confirm("确认删除这条笔记？")) return;
     persist(notes.filter((n) => n.id !== id));
+  };
+
+  const handleAiOrganize = () => {
+    const summary = notes
+      .slice(0, 6)
+      .map((n, i) => `${i + 1}. 【${n.chapter}】${n.title}：${n.excerpt.slice(0, 120)}`)
+      .join("\n");
+    const prompt = summary
+      ? `请帮我将以下学习笔记进行 AI 结构化整理，提炼核心知识层级大纲（导图化总结）并指出复习重点：\n\n${summary}`
+      : "请结合当前课程的核心知识点，为我生成一份结构化的复习笔记大纲与知识导图要点。";
+    onAskAI?.(prompt);
+  };
+
+  const handleTurnIntoQuiz = (note: Note) => {
+    const prompt = `请根据我的这条学习笔记《${note.title}》（章节：${note.chapter}，内容：${note.excerpt}），为我命制 2 道针对性的巩固测试题（含答案与详细解析），并在需要时检索课程知识库补充考点。`;
+    onAskAI?.(prompt);
   };
 
   const allTags = Array.from(new Set(notes.flatMap((n) => n.tags)));
@@ -190,6 +225,7 @@ export function NotesView() {
             <Plus className="h-3.5 w-3.5" /> 新建笔记
           </button>
           <button
+            onClick={handleAiOrganize}
             className="flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-[12px] font-medium transition hover:opacity-90"
             style={{ background: "linear-gradient(135deg, var(--primary), var(--destructive))", color: "var(--primary-foreground)" }}
           >
@@ -215,13 +251,13 @@ export function NotesView() {
       )}
 
       {tab === "graph" ? (
-        <GraphView notes={notes} />
+        <GraphView notes={notes} rootLabel={courseTitle} />
       ) : (
         <>
           {notes.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border py-16 text-muted-foreground">
               <NotebookPen className="h-8 w-8 opacity-40" />
-              <p className="text-[13px]">还没有笔记，点击「新建笔记」开始记录</p>
+              <p className="text-[13px]">还没有笔记，点击「新建笔记」或在 AI 伴学回复中点击「存笔记」</p>
             </div>
           )}
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -245,7 +281,7 @@ export function NotesView() {
                     {n.tags.map((t) => (
                       <span key={t} className="rounded-md bg-secondary/50 px-1.5 py-0.5 font-mono text-[9px] text-[var(--primary)]">#{t}</span>
                     ))}
-                    <div className="ml-auto flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                    <div className="ml-auto flex items-center gap-1 opacity-80 transition group-hover:opacity-100">
                       <button
                         onClick={() => setModal({ mode: "edit", note: n })}
                         className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-secondary hover:text-foreground"
@@ -258,7 +294,10 @@ export function NotesView() {
                       >
                         <Trash2 className="h-3 w-3" /> 删除
                       </button>
-                      <button className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-secondary hover:text-[var(--primary)]">
+                      <button
+                        onClick={() => handleTurnIntoQuiz(n)}
+                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-[var(--primary)] transition hover:bg-[var(--primary)]/15"
+                      >
                         <FileQuestion className="h-3 w-3" /> 变考题
                       </button>
                     </div>
@@ -274,6 +313,7 @@ export function NotesView() {
         {modal && (
           <NoteModal
             initial={modal.note}
+            chapters={dynamicChapters}
             onSave={handleSave}
             onClose={() => setModal(null)}
           />
@@ -295,9 +335,9 @@ function TabBtn({ on, onClick, icon: Icon, label }: { on: boolean; onClick: () =
   );
 }
 
-function GraphView({ notes }: { notes: Note[] }) {
+function GraphView({ notes, rootLabel }: { notes: Note[]; rootLabel: string }) {
   const chapterSet = Array.from(new Set(notes.map((n) => n.chapter)));
-  const rootNode = { x: 50, y: 12, label: "数据结构", root: true };
+  const rootNode = { x: 50, y: 12, label: rootLabel, root: true };
 
   const chapterNodes = chapterSet.map((ch, i) => ({
     x: 10 + (i / Math.max(chapterSet.length - 1, 1)) * 80,

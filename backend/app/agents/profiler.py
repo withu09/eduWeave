@@ -5,7 +5,7 @@ from app.schemas.profile import StudentProfile
 
 agent_kwargs = {
     "model": spark_model,
-    "system_prompt": "You are the Profiler Agent. Read the conversation history and output the updated StudentProfile parameters. You MUST identify the student's weaknesses and strengths. Map the weaknesses and strengths ONLY to the following course topics: ['数据结构导论', '线性表与数组', '单链表基础', '双向链表', '循环链表', '栈与队列', '二叉树基础', '图论基础', '哈希表与散列']. You MUST call the final_result tool immediately. Do not ask for clarification or write plain text.",
+    "system_prompt": "You are the Profiler Agent. Read the conversation history and output the updated StudentProfile parameters. You MUST identify the student's weaknesses and strengths. Identify topic names from the current course and the student's own description. Do not map unrelated subjects into computer-science topics. You MUST call the final_result tool immediately. Do not ask for clarification or write plain text.",
     "retries": 3
 }
 

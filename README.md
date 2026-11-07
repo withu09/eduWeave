@@ -2,6 +2,10 @@
 
 > 面向学习者的 AI 学习导航系统 —— 用对话驱动学情画像、知识图谱与个性化学习路径。
 
+本地运行已支持 **阿里云百炼通用模型 API**（北京地域、`deepseek-v4.1-flash-1017`）。首次使用请先阅读 [本地运行说明.md](本地运行说明.md)，配置 `bailian.env.example` → `.env.bailian`，然后运行 `docker compose --env-file .env.bailian up -d --build`。原讯飞接入保留，可通过 `LLM_PROVIDER` 选择。
+
+百炼通用资源包是否抵扣取决于模型、地域与有效期；Coding Plan 编程套餐不适用于应用后端。语音服务仍单独使用讯飞，视频任务仍为模拟实现。
+
 EduWeave AI 把「问一句」变成「一条学习路径」：用户以自然语言描述学习目标后，后端多智能体流水线会实时抽取学情画像、检索知识库、生成学习路径与配套的讲义 / 题目 / 代码 / 演示文稿，前端以「星图」可视化呈现整棵知识网络。
 
 ---
@@ -25,7 +29,7 @@ EduWeave AI 把「问一句」变成「一条学习路径」：用户以自然�
 
 | 能力 | 说明 | 主要入口 |
 | --- | --- | --- |
-| AI 学习对话 | SSE 流式输出，边思考边回复 | `GET /api/chat` |
+| AI 学习对话 | 携带同一会话历史，SSE 流式回复 | `POST /api/chat` |
 | 学情画像 | 从对话中实时抽取知识点掌握度与薄弱项 | Profiler Agent |
 | 学习路径规划 | 将目标拆解为有序知识节点 | Chat Agent → `recommend_plan` |
 | 知识库管理 | 课程 / 模块 / 节点三级树，Dify 双向同步 | `/api/kb/*` |
@@ -44,7 +48,7 @@ EduWeave AI 把「问一句」变成「一条学习路径」：用户以自然�
 
 **前端** — React 18.3 · TypeScript · Vite 6 · Tailwind CSS 4 · Radix UI · Zustand · Mermaid · Recharts · KaTeX · Motion
 
-**外部服务** — 讯飞星火 X2（大模型）· 讯飞超拟人 TTS · Dify（知识库数据集）
+**外部服务** — 阿里云百炼 / 讯飞星火（可选模型后端）· 讯飞超拟人 TTS（独立可选服务）· Dify（知识库数据集，可选）
 
 ---
 
@@ -157,6 +161,8 @@ eduweave/
 
 ### 方式一：Docker Compose（推荐）
 
+百炼用户请使用上方的“本地运行说明”；下列 `.env` 命令用于原讯飞配置。百炼运行时始终带 `--env-file .env.bailian`，以隔离交接包中的旧凭据。数据库缺失表会在启动时创建；百炼本机配置还会向空数据库添加示例课程。
+
 ```bash
 # 1. 准备配置
 cp .env.example .env
@@ -184,7 +190,7 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 
-**前端**（需要 Node.js 18+）：
+**前端**（需要 Node.js 22+）：
 
 ```bash
 cd frontend
@@ -204,7 +210,10 @@ npm run dev
 
 | 变量 | 说明 | 是否必需 |
 | --- | --- | --- |
-| `XUNFEI_SPARK_APP_ID / API_KEY / API_SECRET` | 讯飞星火大模型凭据 | ✅ 必需 |
+| `LLM_PROVIDER` | `bailian` / `xunfei`，选择所有智能体使用的模型服务 | ✅ 必需 |
+| `DASHSCOPE_API_KEY` | 百炼通用模型 API Key | 使用百炼时必需 |
+| `DASHSCOPE_BASE_URL / DASHSCOPE_MODEL` | 对应地域接口地址 / 模型名（本机为北京、`deepseek-v4.1-flash-1017`） | 使用百炼时配置 |
+| `XUNFEI_SPARK_APP_ID / API_KEY / API_SECRET` | 讯飞星火大模型凭据 | 使用讯飞时必需 |
 | `XUNFEI_TTS_APP_ID / API_KEY / API_SECRET` | 讯飞语音合成凭据 | ⚠️ TTS 功能必需 |
 | `XUNFEI_TTS_ENDPOINT` | TTS 专属 WebSocket 端点 | ⚠️ TTS 功能必需 |
 | `DIFY_API_KEY` | Dify 数据集 API Key，用于知识库同步 | ⚠️ 同步功能必需 |
@@ -224,7 +233,8 @@ npm run dev
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/chat?user_input=` | SSE 流式学习对话 |
+| POST | `/api/chat` | 携带 `user_input` 与 `history` 的多轮流式对话 |
+| GET | `/api/chat?user_input=` | 兼容旧客户端的单轮流式对话 |
 | GET | `/api/resources?course=` | 推荐学习资源 |
 | GET | `/api/kb/tree` | 知识库三级树 |
 | PATCH | `/api/kb/tree/{node_type}/{node_id}` | 重命名节点 |
@@ -301,4 +311,6 @@ npm run dev
 
 ## 许可
 
-本项目为中国软件杯参赛作品，源码仅供团队内部与赛事评审使用。
+源码仅供团队内部与赛事评审使用。
+
+参赛部署、测试与作品提交流程见 [参赛完整指南.md](参赛完整指南.md)。

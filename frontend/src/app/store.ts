@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { StarNode, constellation as initialConstellation } from "./data";
 import { NodeStatus } from "./data";
 import dagre from "dagre";
+import { API_BASE } from "./config";
+import { learningRequest, type LearningPlan } from "./learning";
 
 export interface RecommendedResource {
   id: string;
@@ -22,6 +24,18 @@ interface StudyStore {
   resetConstellation: () => void;
   setResources: (resources: RecommendedResource[] | ((prev: RecommendedResource[]) => RecommendedResource[])) => void;
   fetchConstellation: (courseId: string) => Promise<void>;
+  applyLearningPlan: (plan: LearningPlan) => void;
+}
+
+function withLearningProgress(nodes: StarNode[], plan: LearningPlan): StarNode[] {
+  const steps = new Map(plan.steps.map(step => [step.id, step]));
+  return nodes.map(node => {
+    const step = steps.get(node.id);
+    if (!step) return node;
+    const status: NodeStatus = step.status === "mastered" ? "mastered"
+      : step.status === "weakness" ? "weakness" : step.blocked_by.length ? "locked" : "unlocked";
+    return { ...node, status, mastery: step.mastery };
+  });
 }
 
 function applyDagreLayout(nodes: StarNode[]): StarNode[] {
@@ -87,6 +101,10 @@ export const useStudyStore = create<StudyStore>((set) => ({
     set({ currentScope: scope });
   },
 
+  applyLearningPlan: (plan) => {
+    set(state => ({ constellation: withLearningProgress(state.constellation, plan) }));
+  },
+
   setResources: (updater) => {
     set((state) => ({
       resources: typeof updater === "function" ? updater(state.resources) : updater,
@@ -123,14 +141,19 @@ export const useStudyStore = create<StudyStore>((set) => ({
     set({ loading: true });
     try {
       const url = courseId === 'all' 
-        ? `http://localhost:8000/api/kb/starmap/all`
-        : `http://localhost:8000/api/kb/starmap/${courseId}`;
+        ? `${API_BASE}/api/kb/starmap/all`
+        : `${API_BASE}/api/kb/starmap/${courseId}`;
       const res = await fetch(url, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         const nodes: StarNode[] = data.data;
         if (nodes && nodes.length > 0) {
-          const laidOutNodes = applyDagreLayout(nodes);
+          let progressNodes = nodes;
+          try {
+            const plan = await learningRequest<LearningPlan>(`/plan?course_id=${encodeURIComponent(courseId)}`);
+            progressNodes = withLearningProgress(nodes, plan);
+          } catch (error) { console.error("Failed to load learning progress", error); }
+          const laidOutNodes = applyDagreLayout(progressNodes);
           set({ constellation: laidOutNodes });
         } else {
           set({ constellation: [] });

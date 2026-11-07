@@ -1,3 +1,4 @@
+from app.utils.knowledge import context_for_deps
 import inspect
 from typing import List
 from pydantic import BaseModel, Field
@@ -35,17 +36,7 @@ async def get_presenter_prompt(ctx: RunContext[AgentDeps]) -> str:
     await set_agent_status("Presenter", "working")
     await log_thought("Presenter", f"正在检索 '{query_topic}' 的课程资料以准备生成微课...")
     
-    try:
-        if ctx.deps.chroma_client:
-            results = ctx.deps.chroma_client.get_collection("dsa").query(
-                query_texts=[query_topic],
-                n_results=2
-            )
-            rag_context = "\n".join(results["documents"][0])
-        else:
-            rag_context = f"Fallback material: Use your general knowledge about {query_topic}."
-    except Exception:
-        rag_context = f"Fallback material: Use your general knowledge about {query_topic}."
+    rag_context = await context_for_deps(ctx.deps, query_topic)
         
     await log_thought("Presenter", f"知识点提取完毕，开始撰写【{query_topic}】微课逐字稿及幻灯片大纲...")
     

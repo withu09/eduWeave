@@ -1,8 +1,7 @@
 // ===========================================================================
-// 星图百科 · Mock 引擎
+// 星图百科 · 后端接口
 // ---------------------------------------------------------------------------
-// 本文件是「织星」三种模式的前端模拟实现，全部返回 mock 数据。
-// TODO: 接入讯飞星火 (Spark X / Ultra-32K) 与 Dify 智能体。
+// 三种模式通过后端调用统一配置的模型服务，支持百炼或讯飞。
 //   - 浏览器直连会暴露密钥并被 CORS 拦截，生产环境务必走
 //     Supabase Edge Function 代理，由服务端持有 SPARK_API_KEY / DIFY_API_KEY。
 //   - 下方每个 run* 函数即真实接口的替换点：保持签名不变，把 mock 体替换为
@@ -10,23 +9,25 @@
 // ===========================================================================
 
 import { profileRadar, recommendedResources, type RecommendedResource } from "../data";
+import type { ConversationTurn } from "../conversation";
+import { API_BASE } from "../config";
 
 export type StarMode = "default" | "socratic" | "pro";
 
 export const MODE_META: Record<StarMode, { label: string; sub: string; desc: string }> = {
   default: {
-    label: "xfyun织星",
-    sub: "Spark X · learnanything",
+    label: "织星",
+    sub: "知识速览 · learnanything",
     desc: "全能导师：一句话生成结构化课程（大纲/概念/小测/挑战）",
   },
   socratic: {
-    label: "xfyun织星-苏格拉底",
-    sub: "Spark X · 启发式三智能体",
+    label: "织星 · 苏格拉底",
+    sub: "启发式学习 · 三智能体",
     desc: "绝不直接给答案：反问引导 → TDD 闯关 → 通关总结奖励",
   },
   pro: {
-    label: "xfyun织星 Pro",
-    sub: "Spark Ultra-32K · 建站流水线",
+    label: "织星 Pro",
+    sub: "知识网页 · 建站流水线",
     desc: "一句话生成可运行的学习网站：织网 → 织核 → 织皮 → 打开",
   },
 };
@@ -59,7 +60,7 @@ export async function extractIntent(query: string): Promise<LearnIntent> {
   };
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 
 // --- 默认模式：learnanything 结构化输出 ------------------------------------
 export interface FollowUp {
@@ -77,11 +78,11 @@ export interface DefaultResult {
   modules: LearnModule[];
 }
 
-export async function runDefaultMode(query: string): Promise<DefaultResult> {
+export async function runDefaultMode(query: string, history: ConversationTurn[] = []): Promise<DefaultResult> {
   const res = await fetch(`${API_BASE}/api/starmap/default`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, history }),
   });
   if (!res.ok) {
     throw new Error(`Failed to run default mode: ${res.statusText}`);
@@ -98,7 +99,7 @@ export interface SocraticResult {
   nextStage: SocraticStage;
 }
 
-export async function runSocraticMode(query: string, stage: SocraticStage, history: any[] = []): Promise<SocraticResult> {
+export async function runSocraticMode(query: string, stage: SocraticStage, history: ConversationTurn[] = []): Promise<SocraticResult> {
   const res = await fetch(`${API_BASE}/api/starmap/socratic`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -122,11 +123,11 @@ export interface ProResult {
   html: string; // 生成的 index.html，前端用 iframe srcDoc 预览
 }
 
-export async function runProMode(query: string): Promise<ProResult> {
+export async function runProMode(query: string, history: ConversationTurn[] = []): Promise<ProResult> {
   const res = await fetch(`${API_BASE}/api/starmap/pro`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, history }),
   });
   if (!res.ok) {
     throw new Error(`Failed to run pro mode: ${res.statusText}`);

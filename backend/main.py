@@ -4,6 +4,7 @@ import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic_ai import Agent
 from app.agents.orchestrator import StudentProfile, StudyPlan, fallback_json_parser
 from app.agents.profiler import profiler_agent
 from app.agents.chat import chat_agent
@@ -14,11 +15,17 @@ from app.agents.tasks import generate_heavy_media, celery_app
 from contextlib import asynccontextmanager
 import chromadb
 from app.utils.telemetry import redis_client
+from app.schemas.conversation import ChatRequest, ChatTurn, model_history
 
 # Import routers
 from app.routers.kb import router as kb_router
 from app.routers.tts import router as tts_router
 from app.routers.starmap import router as starmap_router
+from app.routers.adaptive import router as adaptive_router
+from app.routers.practice import router as practice_router
+from app.routers.console import router as console_router
+from app.routers.course_build import router as course_build_router
+from app.utils.telemetry import tracked_run, agent_call
 
 # Initialize Chroma client
 try:
@@ -29,8 +36,10 @@ except Exception as e:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.db.database import init_db
+    await asyncio.to_thread(init_db)
     print("Checking Chroma DB connectivity...")
-    if chroma_client is not None:
+    if chroma_client is not None and os.getenv("SEED_VECTOR_KB", "true").lower() == "true":
         try:
             collection = chroma_client.get_or_create_collection("dsa")
             if collection.count() == 0:
@@ -51,13 +60,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"Chroma seeding failed: {e}. Fallback to mock.")
     else:
-        print("Chroma client is None. Seeding skipped.")
+        print("Vector seeding skipped (disabled or Chroma unavailable).")
         
     print("Performing initial Dify Knowledge Base Sync...")
     try:
         from app.utils.dify_client import get_datasets
         import app.utils.kb_db as kb_db
-        res = get_datasets(limit=100)
+        res = await asyncio.to_thread(get_datasets, limit=100)
         datasets = res.get("data", [])
         kb_db.sync_from_dify(datasets)
         print(f"Initial Dify KB Sync completed successfully. Found {len(datasets)} datasets.")
@@ -71,15 +80,23 @@ async def lifespan(app: FastAPI):
             try:
                 from app.utils.dify_client import get_datasets
                 import app.utils.kb_db as kb_db
-                res = get_datasets(limit=100)
+                res = await asyncio.to_thread(get_datasets, limit=100)
                 datasets = res.get("data", [])
                 kb_db.sync_from_dify(datasets)
             except Exception as e:
                 pass
 
+    from app.utils.course_builder import poll_course_builds
+    from app.routers.course_build import _tasks as build_tasks
     bg_task = asyncio.create_task(poll_dify())
-    yield
-    bg_task.cancel()
+    build_task = asyncio.create_task(poll_course_builds())
+    try:
+        yield
+    finally:
+        pending = [bg_task, build_task, *build_tasks]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
 app = FastAPI(lifespan=lifespan)
 
@@ -94,6 +111,21 @@ app.add_middleware(
 app.include_router(kb_router)
 app.include_router(tts_router)
 app.include_router(starmap_router)
+app.include_router(adaptive_router)
+app.include_router(practice_router)
+app.include_router(console_router)
+app.include_router(course_build_router)
+
+@app.get("/api/health")
+async def health():
+    from app.core import settings
+    is_bailian = settings.LLM_PROVIDER.lower() in {"bailian", "dashscope", "aliyun"}
+    return {
+        "status": "ok",
+        "provider": settings.LLM_PROVIDER,
+        "model": settings.DASHSCOPE_MODEL if is_bailian else settings.XUNFEI_SPARK_MODEL,
+        "model_configured": bool(settings.DASHSCOPE_API_KEY if is_bailian else settings.XUNFEI_SPARK_API_KEY and settings.XUNFEI_SPARK_API_SECRET),
+    }
 
 @app.get("/api/resources")
 async def get_resources(course: str, exclude: str = ""):
@@ -102,7 +134,7 @@ async def get_resources(course: str, exclude: str = ""):
         prompt += f" EXCLUDE the following resources: {exclude}"
     
     try:
-        ctx = await resource_agent.run(prompt)
+        ctx = await tracked_run('Resource', '推荐学习资源', resource_agent.run(prompt))
         return ctx.output.model_dump()
     except Exception as e:
         print(f"Resource Agent failed: {e}")
@@ -121,14 +153,58 @@ async def get_resources(course: str, exclude: str = ""):
 
 @app.get("/api/chat")
 async def chat_stream(user_input: str):
+    """Backward-compatible single-turn endpoint."""
+    return chat_response(user_input, [])
+
+
+@app.post("/api/chat")
+async def chat_with_history(req: ChatRequest):
+    return chat_response(req.user_input, req.history, req.course_id, req.node_id)
+
+
+def chat_response(user_input: str, history: list[ChatTurn], course_id: str | None = None, node_id: str | None = None):
+    previous_messages = model_history(history)
     async def event_generator():
+        from app.core import settings
+        if settings.LLM_PROVIDER.lower() in {"bailian", "dashscope", "aliyun"} and not settings.DASHSCOPE_API_KEY:
+            yield f"1:{json.dumps('请先在项目的 .env.bailian 中填写 DASHSCOPE_API_KEY，然后重新启动服务。', ensure_ascii=False)}\n"
+            return
         from app.utils.telemetry import set_agent_status, log_token_usage, log_thought
         yield "0:\"Analyzing your request...\"\n"
         await asyncio.sleep(0.2)
+        from app.utils import kb_db
+        with kb_db.SessionLocal() as db:
+            resolved_course_id = course_id
+            if not resolved_course_id or resolved_course_id == "all":
+                first_course = (
+                    db.query(kb_db.Course)
+                    .filter(kb_db.Course.dify_dataset_id.isnot(None))
+                    .first()
+                    or db.query(kb_db.Course).first()
+                )
+                if first_course:
+                    resolved_course_id = first_course.id
+            topics = db.query(kb_db.Node).join(kb_db.Module)
+            if resolved_course_id and resolved_course_id != "all":
+                topics = topics.filter(kb_db.Module.course_id == resolved_course_id)
+            topic_rows = topics.all()
+            available_topics = [node.title for node in topic_rows]
+            topic_id_map = {node.title: node.id for node in topic_rows}
+            selected_node_title = None
+            if node_id:
+                matched_node = db.get(kb_db.Node, node_id)
+                if matched_node:
+                    selected_node_title = matched_node.title
+        course_context = f"当前课程已有知识点：{json.dumps(available_topics, ensure_ascii=False)}。"
+        if selected_node_title:
+            course_context += f"用户当前正在查看的知识点节点：{selected_node_title}（node_id={node_id}）。"
         # 1. Run Profiler Agent to extract StudentProfile
         await set_agent_status("Profiler", "working")
         try:
-            profile_ctx = await profiler_agent.run(f"Extract profile from user query: {user_input} (User ID: stud-01)")
+            profile_ctx = await tracked_run('Profiler', '分析伴学对话中的学习情况', profiler_agent.run(
+                f"{course_context}\nExtract profile from user query: {user_input} (User ID: stud-01)",
+                message_history=previous_messages,
+            ))
             profile = profile_ctx.output
             asyncio.create_task(log_token_usage("Profiler", profile_ctx.usage().total_tokens if profile_ctx.usage() else 500))
             if profile.weaknesses:
@@ -140,25 +216,42 @@ async def chat_stream(user_input: str):
             await set_agent_status("Profiler", "idle")
         
         # 2. Run Chat Agent to stream conversational response and potentially call recommend_plan
-        deps = AgentDeps(chroma_client=chroma_client, student_profile=profile)
+        deps = AgentDeps(chroma_client=chroma_client, student_profile=profile, course_id=resolved_course_id, node_id=node_id, available_topics=available_topics)
         
         await set_agent_status("Director", "working")
         try:
-            async with chat_agent.run_stream(f"User query: {user_input}", deps=deps) as result:
-                async for chunk in result.stream():
-                    # Stream the standard conversational text back to frontend as type '1'
-                    yield f"1:{json.dumps(chunk, ensure_ascii=False)}\n"
+            # Use iter() instead of run_stream(): run_stream() stops at the first text
+            # part, so tool calls emitted after a short preamble (e.g. recommend_plan)
+            # would never execute. iter() runs every tool call and we still stream
+            # each model response's text. Type '1' carries the accumulated reply.
+            async with agent_call("Director", "AI 伴学对话与学习路径规划") as invocation, chat_agent.iter(
+                f"{course_context}\nUser query: {user_input}", deps=deps, message_history=previous_messages,
+            ) as result:
+                reply = ""
+                async for node in result:
+                    if not Agent.is_model_request_node(node):
+                        continue
+                    prefix = reply + ("\n\n" if reply else "")
+                    segment = ""
+                    async with node.stream(result.ctx) as stream:
+                        async for text in stream.stream_text():
+                            segment = text
+                            yield f"1:{json.dumps(prefix + segment, ensure_ascii=False)}\n"
+                    if segment.strip():
+                        reply = prefix + segment
+                invocation.usage(result.usage())
             asyncio.create_task(log_token_usage("Director", result.usage().total_tokens if result.usage() else 1500))
                     
             # Check if the recommend_plan tool was called by looking at deps.study_plan
             if deps.study_plan:
                 yield f"0:\"Path planned. Rendering nodes...\"\n"
-                yield f"9:{json.dumps({'nodes': deps.study_plan.nodes, 'description': deps.study_plan.description})}\n"
+                node_items = [{"id": topic_id_map.get(n), "title": n} for n in deps.study_plan.nodes]
+                yield f"9:{json.dumps({'nodes': deps.study_plan.nodes, 'node_items': node_items, 'description': deps.study_plan.description}, ensure_ascii=False)}\n"
                 
                 # Run Writer Agent to generate detailed docs since a plan was recommended
                 try:
                     await set_agent_status("Writer", "working")
-                    writer_ctx = await writer_agent.run(f"Generate details for nodes {deps.study_plan.nodes}", deps=deps)
+                    writer_ctx = await tracked_run('Writer', '生成学习路径讲义', writer_agent.run(f"Generate details for nodes {deps.study_plan.nodes}", deps=deps))
                     asyncio.create_task(log_token_usage("Writer", writer_ctx.usage().total_tokens if writer_ctx.usage() else 2000))
                     yield f"0:\"Docs generated.\"\n"
                     

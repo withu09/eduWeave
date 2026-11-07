@@ -94,7 +94,7 @@ export function Sidebar({ active, onChange }: { active: ViewKey; onChange: (v: V
               <span className="h-2 w-2 rounded-full" style={{ background: "var(--chart-2)" }} />
               <span className="text-[11px]">系统在线</span>
             </div>
-            <p className="font-mono text-[9px] leading-relaxed text-muted-foreground">Spark · LangGraph<br />6 Agents · RAG ready</p>
+            <p className="font-mono text-[9px] leading-relaxed text-muted-foreground">学习路径 · 知识星图<br />AI 学习助手</p>
           </div>
         </div>
       )}

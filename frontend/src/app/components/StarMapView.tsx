@@ -14,11 +14,12 @@ import {
   type ProResult,
 } from "../starmap/engine";
 import type { RecommendedResource } from "../data";
+import { conversationHistory } from "../conversation";
 
 // ---- Message model --------------------------------------------------------
 type Msg =
   | { id: string; role: "user"; text: string; web?: boolean }
-  | { id: string; role: "assistant"; kind: "text"; agent: string; text: string }
+  | { id: string; role: "assistant"; kind: "text"; agent: string; text: string; error?: boolean }
   | { id: string; role: "assistant"; kind: "default"; result: DefaultResult }
   | { id: string; role: "assistant"; kind: "socratic"; result: SocraticResult }
   | { id: string; role: "assistant"; kind: "pro"; result: ProResult }
@@ -48,7 +49,7 @@ function welcomeMsg(): Msg {
     id: "welcome",
     role: "assistant",
     kind: "text",
-    agent: "xfyun织星",
+    agent: "织星",
     text: "欢迎来到**星图百科** 🌌\n\n左上角可切换三种织星模式，右上角可开启**联网搜索**让我「长眼睛」。直接输入一句话，例如「C语言怎么学习」，我会为你编织结构化的知识星图。",
   };
 }
@@ -94,7 +95,7 @@ export function StarMapView() {
 
   // Patch the active session immutably.
   const patchActive = (fn: (s: Session) => Session) =>
-    setStore((st) => ({ ...st, sessions: st.sessions.map((s) => (s.id === st.activeId ? fn(s) : s)) }));
+    setStore((st) => ({ ...st, sessions: st.sessions.map((s) => (s.id === active.id ? fn(s) : s)) }));
 
   const push = (m: Msg) => patchActive((s) => ({ ...s, msgs: [...s.msgs, m] }));
   const setMode = (m: StarMode) => patchActive((s) => ({ ...s, mode: m, socraticStage: m === "socratic" ? "inquire" : s.socraticStage }));
@@ -111,6 +112,7 @@ export function StarMapView() {
   const ask = async (text: string) => {
     const q = text.trim();
     if (!q || loading) return;
+    const history = conversationHistory(active.msgs);
     const isFirst = active.msgs.filter((m) => m.role === "user").length === 0;
     patchActive((s) => ({
       ...s,
@@ -125,16 +127,17 @@ export function StarMapView() {
         push({ id: uid(), role: "assistant", kind: "websearch", query: q, results });
       }
       if (mode === "default") {
-        const result = await runDefaultMode(q);
+        const result = await runDefaultMode(q, history);
         push({ id: uid(), role: "assistant", kind: "default", result });
       } else if (mode === "socratic") {
-        const history = active.msgs.map(m => ({ role: m.role, text: m.role === 'user' ? (m as any).text : (m.kind === 'socratic' ? (m as any).result.markdown : '') })).filter(m => m.text);
         const result = await runSocraticMode(q, active.socraticStage, history);
         patchActive((s) => ({ ...s, socraticStage: result.nextStage, msgs: [...s.msgs, { id: uid(), role: "assistant", kind: "socratic", result }] }));
       } else {
-        const result = await runProMode(q);
+        const result = await runProMode(q, history);
         push({ id: uid(), role: "assistant", kind: "pro", result });
       }
+    } catch (error) {
+      push({ id: uid(), role: "assistant", kind: "text", agent: "织星", error: true, text: `本次回答未完成：${error instanceof Error ? error.message : String(error)}。请稍后重试。` });
     } finally {
       setLoading(false);
     }
@@ -340,7 +343,7 @@ export function StarMapView() {
           </button>
         </div>
         <p className="mx-auto mt-1.5 max-w-[760px] px-1 font-mono text-[9px] text-muted-foreground">
-          {MODE_META[mode].sub} · 当前为前端模拟，真实回答将由讯飞星火{web ? " + Dify 联网" : ""}经后端代理生成
+          {MODE_META[mode].sub} · 输入学习目标，开始探索知识
         </p>
       </div>
       </div>
@@ -391,7 +394,7 @@ function TextBody({ agent, text }: { agent: string; text: string }) {
 function DefaultModules({ result, onFollow }: { result: DefaultResult; onFollow: (t: string) => void }) {
   return (
     <div>
-      <AgentTag name="xfyun织星 · learnanything" />
+      <AgentTag name="织星 · learnanything" />
       <div className="mb-3 rounded-xl border border-border bg-background/50 p-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
         <span className="text-[var(--primary)]">意图解析</span> · Subject: {result.intent.subject} ｜ Audience: {result.intent.audience} ｜ Duration: {result.intent.duration} ｜ Goal: {result.intent.goal}
       </div>
@@ -433,7 +436,7 @@ function ProPipeline({ result }: { result: ProResult }) {
 
   return (
     <div>
-      <AgentTag name="xfyun织星 Pro · 建站流水线" />
+      <AgentTag name="织星 Pro · 建站流水线" />
       <div className="space-y-1.5">
         {result.steps.map((s, i) => {
           const state = i < step ? "done" : i === step ? "active" : "wait";

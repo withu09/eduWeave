@@ -1,17 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import List, Literal
 
-CourseTopic = Literal[
-    "数据结构导论",
-    "线性表与数组",
-    "单链表基础",
-    "双向链表",
-    "循环链表",
-    "栈与队列",
-    "二叉树基础",
-    "图论基础",
-    "哈希表与散列"
-]
+CourseTopic = str  # Knowledge topics come from each course, not a fixed subject list.
 
 class StudentProfile(BaseModel):
     user_id: str = "stud-01"

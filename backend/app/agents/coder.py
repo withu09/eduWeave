@@ -1,3 +1,4 @@
+from app.utils.knowledge import context_for_deps
 import inspect
 from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
@@ -37,14 +38,7 @@ async def get_coder_prompt(ctx: RunContext[AgentDeps]) -> str:
     await set_agent_status("Coder", "working")
     await log_thought("Coder", f"正在检索 '{query_topic}' 并准备生成编程题目...")
     
-    try:
-        results = ctx.deps.chroma_client.get_collection("dsa").query(
-            query_texts=[query_topic],
-            n_results=1
-        )
-        rag_context = "\n".join(results["documents"][0])
-    except Exception:
-        rag_context = f"Fallback material: Use your general knowledge about {query_topic}."
+    rag_context = await context_for_deps(ctx.deps, query_topic)
         
     await log_thought("Coder", "开始编写代码沙盒的 boilerplate 和解答代码...")
     

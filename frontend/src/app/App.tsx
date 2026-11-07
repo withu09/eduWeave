@@ -12,10 +12,13 @@ import { NotesView } from "./components/NotesView";
 import { CommunityView } from "./components/CommunityView";
 import { StarMapView } from "./components/StarMapView";
 import { useStudyStore } from "./store";
+import { API_BASE } from "./config";
+import { useSpeechState, stopAllSpeech } from "./speech";
 
 export default function App() {
   const [view, setView] = useState<ViewKey>("canvas");
   const [selected, setSelected] = useState<string | null>(null);
+  const [studyNode, setStudyNode] = useState<{ id: string; tab: "doc" | "quiz" } | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [seedText, setSeedText] = useState("");
@@ -56,13 +59,13 @@ export default function App() {
   useEffect(() => {
     const loadData = async () => {
       try {
-        let res = await fetch('http://localhost:8000/api/kb/tree', { cache: 'no-store' });
+        let res = await fetch(`${API_BASE}/api/kb/tree`, { cache: 'no-store' });
         let data = await res.json();
         let tree = data.tree;
 
         // Auto-recover from Dify if the database is empty on restart
         if (!tree || tree.length === 0) {
-          const syncRes = await fetch('http://localhost:8000/api/kb/sync', { method: 'POST' });
+          const syncRes = await fetch(`${API_BASE}/api/kb/sync`, { method: 'POST' });
           if (syncRes.ok) {
             const syncData = await syncRes.json();
             tree = syncData.tree;
@@ -88,8 +91,9 @@ export default function App() {
     }
   }, [currentScope, fetchConstellation, courses.length]);
 
-  const mastered = constellation.filter((n) => n.status === "mastered").length;
-  const progress = constellation.length > 0 ? Math.round((mastered / constellation.length) * 100) : 0;
+  const knowledgeNodes = constellation.filter(n => n.type === "node");
+  const mastered = knowledgeNodes.filter(n => n.status === "mastered").length;
+  const progress = knowledgeNodes.length > 0 ? Math.round((mastered / knowledgeNodes.length) * 100) : 0;
 
   return (
     <div className={`${dark ? "dark" : ""} relative flex h-screen w-full flex-col overflow-hidden bg-background text-foreground`}>
@@ -99,11 +103,22 @@ export default function App() {
           <div className="flex items-center gap-3">
             <button
               onClick={() => setSettingsOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl border border-border text-primary-foreground transition hover:opacity-90"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-border text-primary-foreground transition hover:opacity-90"
               style={{ background: "linear-gradient(135deg, var(--primary), var(--accent))" }}
-              title="永恒星核 · 配置"
+              title="织星 AI · 永恒星核配置"
             >
-              <Settings2 className="h-4 w-4" />
+              <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                {/* Rising 4-point star */}
+                <path d="M12 3.2 L13.4 7.6 L17.8 9 L13.4 10.4 L12 14.8 L10.6 10.4 L6.2 9 L10.6 7.6 Z" fill="currentColor" stroke="none" />
+                {/* Left & Right satellite nodes + connecting lines */}
+                <line x1="6.8" y1="10.2" x2="9.6" y2="9.4" strokeWidth="1.6" />
+                <line x1="17.2" y1="10.2" x2="14.4" y2="9.4" strokeWidth="1.6" />
+                <circle cx="5.2" cy="10.6" r="1.6" fill="var(--primary)" strokeWidth="1.7" />
+                <circle cx="18.8" cy="10.6" r="1.6" fill="var(--primary)" strokeWidth="1.7" />
+                {/* Open book pages below */}
+                <path d="M4.5 16.2 C7 14.8 9.8 15.2 12 16.8 C14.2 15.2 17 14.8 19.5 16.2 L19.5 19.6 C17 18.2 14.2 18.6 12 20.2 C9.8 18.6 7 18.2 4.5 19.6 Z" />
+                <line x1="12" y1="16.8" x2="12" y2="20.2" />
+              </svg>
             </button>
             <div>
               <div className="flex items-center gap-2">
@@ -173,15 +188,31 @@ export default function App() {
             </CanvasFrame>
           )}
           {view === "console" && <div className="h-full"><ConsoleView /></div>}
-          {view === "adaptive" && <div className="h-full"><AdaptiveView /></div>}
+          {view === "adaptive" && <div className="h-full"><AdaptiveView onStudy={(id, tab) => setStudyNode({ id, tab })} /></div>}
           {view === "starmap" && <div className="h-full"><StarMapView /></div>}
-          {view === "notes" && <div className="h-full"><NotesView /></div>}
+          {view === "notes" && (
+            <div className="h-full">
+              <NotesView
+                onAskAI={(prompt) => {
+                  setSeedText(prompt);
+                  setCopilotOpen(true);
+                }}
+              />
+            </div>
+          )}
           {view === "community" && <div className="h-full"><CommunityView /></div>}
         </main>
       </div>
 
       {/* ===== Mobile bottom nav ===== */}
       <MobileNav active={view} onChange={(v) => { setView(v); setSelected(null); }} />
+
+      <AnimatePresence>
+        {studyNode && <div className="fixed inset-0 z-30">
+          <button aria-label="返回学习路径" className="absolute inset-0 h-full w-full bg-black/50 backdrop-blur-sm" onClick={() => setStudyNode(null)} />
+          <ResourceCards key={`${studyNode.id}-${studyNode.tab}`} nodeId={studyNode.id} initialTab={studyNode.tab} onClose={() => setStudyNode(null)} />
+        </div>}
+      </AnimatePresence>
 
       {/* ===== Word-selection floating ball ===== */}
       <AnimatePresence>
@@ -201,7 +232,14 @@ export default function App() {
       </AnimatePresence>
 
       {/* ===== Drawers ===== */}
-      <CopilotDrawer open={copilotOpen} onClose={() => setCopilotOpen(false)} seedText={seedText} />
+      <CopilotDrawer
+        open={copilotOpen}
+        onClose={() => setCopilotOpen(false)}
+        seedText={seedText}
+        selectedNodeId={selected || studyNode?.id || null}
+        onOpenNode={(nodeId, tab) => setStudyNode({ id: nodeId, tab })}
+        onNavigateView={(v) => { setView(v); setSelected(null); }}
+      />
       <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
@@ -232,29 +270,50 @@ function MobileNav({ active, onChange }: { active: ViewKey; onChange: (v: ViewKe
   );
 }
 
-// Ambient TTS aura — FFT-style breathing bars driven by a sine loop.
+// Ambient TTS aura — animates when speech is active, calm when idle.
 function TtsAura() {
-  const [bars, setBars] = useState<number[]>(Array(5).fill(0.4));
+  const { speaking, label } = useSpeechState();
+  const [bars, setBars] = useState<number[]>(Array(5).fill(0.25));
   useEffect(() => {
+    if (!speaking) {
+      setBars([0.22, 0.32, 0.25, 0.32, 0.22]);
+      return;
+    }
     let raf = 0;
     let t = 0;
     const tick = () => {
-      t += 0.12;
+      t += 0.14;
       setBars(Array.from({ length: 5 }, (_, i) => 0.35 + Math.abs(Math.sin(t + i * 0.7)) * 0.65));
       raf = requestAnimationFrame(tick);
     };
     tick();
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [speaking]);
   return (
-    <div className="flex items-center gap-2">
-      <Volume2 className="h-3.5 w-3.5 text-[var(--primary)]" />
+    <button
+      type="button"
+      onClick={() => { if (speaking) stopAllSpeech(); }}
+      title={speaking ? "点击停止语音播报" : "语音播报就绪（可在 AI 讲解或 AI 伴学中触发）"}
+      className="flex items-center gap-2 rounded-lg px-2 py-1 transition hover:bg-secondary/60"
+    >
+      <Volume2 className={`h-3.5 w-3.5 ${speaking ? "text-[var(--primary)]" : "text-muted-foreground"}`} />
       <div className="flex h-6 items-center gap-[3px]">
         {bars.map((b, i) => (
-          <span key={i} className="w-[3px] rounded-full" style={{ height: `${b * 22}px`, background: "var(--primary)", boxShadow: "0 0 6px var(--primary)" }} />
+          <span
+            key={i}
+            className="w-[3px] rounded-full transition-all duration-150"
+            style={{
+              height: `${b * 22}px`,
+              background: speaking ? "var(--primary)" : "var(--muted-foreground)",
+              opacity: speaking ? 1 : 0.45,
+              boxShadow: speaking ? "0 0 6px var(--primary)" : "none",
+            }}
+          />
         ))}
       </div>
-      <span className="font-mono text-[10px] text-muted-foreground">朗读中</span>
-    </div>
+      <span className={`font-mono text-[10px] ${speaking ? "text-[var(--primary)]" : "text-muted-foreground"}`}>
+        {label}
+      </span>
+    </button>
   );
 }

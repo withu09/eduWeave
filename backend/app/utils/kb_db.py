@@ -91,6 +91,19 @@ def get_dataset_id_for_course(course_id: str) -> str:
     finally:
         db.close()
 
+
+def get_node_context(node_id: str) -> str:
+    """Keep generic node labels such as '1' within their actual course topic."""
+    with SessionLocal() as db:
+        node = db.query(Node).filter(Node.id == node_id).first()
+        if node:
+            return f"{node.module.course.title} / {node.module.title} / {node.title}"
+        module = db.query(Module).filter(Module.id == node_id).first()
+        if module:
+            return f"{module.course.title} / {module.title}"
+        course = db.query(Course).filter(Course.id == node_id).first()
+        return course.title if course else "核心知识"
+
 def delete_tree_node(node_id: str, node_type: str) -> str:
     db = SessionLocal()
     try:
@@ -134,7 +147,9 @@ def get_resources(node_id: str) -> List[dict]:
                 "id": r.dify_document_id,
                 "name": r.name,
                 "status": r.status,
-                "size": f"{r.size / 1024:.1f} KB" if r.size else "0 KB"
+                "size": f"{r.size / 1024:.1f} KB" if r.size else "0 KB",
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "date": r.created_at.strftime("%Y-%m-%d") if r.created_at else ""
             }
             for r in resources
         ]
@@ -190,10 +205,7 @@ def sync_from_dify(dify_datasets: List[dict]):
                 if did not in existing_dify_map:
                     new_course = Course(title=dname, dify_dataset_id=did)
                     db.add(new_course)
-                else:
-                    local_course = existing_dify_map[did]
-                    if local_course.title != dname:
-                        local_course.title = dname
+                # Existing courses can intentionally use a different local title.
         db.commit()
     finally:
         db.close()
@@ -269,7 +281,7 @@ def _build_starmap_nodes_for_course(course: Course) -> List[dict]:
                 'type': 'node',
                 'x': node.x if node.x is not None else 0,
                 'y': node.y if node.y is not None else 0,
-                'deps': [mod.id]
+                'deps': [mod.id] + json.loads(node.deps or '[]')
             })
     return starmap_nodes
 

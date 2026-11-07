@@ -9,3 +9,8 @@ class AgentDeps:
     student_profile: StudentProfile
     study_plan: Optional[StudyPlan] = None
     node_title: Optional[str] = None
+    node_id: Optional[str] = None
+    course_id: Optional[str] = None
+    knowledge_context: Optional[str] = None
+    knowledge_sources: Optional[list[dict]] = None
+    available_topics: Optional[list[str]] = None

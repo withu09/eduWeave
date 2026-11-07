@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { motion } from "motion/react";
 import { Globe, X, ArrowLeft, ExternalLink, Maximize2, Minimize2, Sparkles, ShieldCheck, Loader2 } from "lucide-react";
 import { useStudyStore, type RecommendedResource } from "../store";
+import { API_BASE } from "../config";
 
 // Sandbox 内嵌网页框 — 画中画 inline browser for Agent-recommended external resources.
 export function InlineBrowser({ onClose }: { onClose: () => void }) {
@@ -15,7 +16,7 @@ export function InlineBrowser({ onClose }: { onClose: () => void }) {
   const fetchResources = async (isMore = false) => {
     setLoading(true);
     try {
-      const apiBaseUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+      const apiBaseUrl = API_BASE;
       const scopeTitle = useStudyStore.getState().currentScope === 'all' 
         ? "宏观宇宙" 
         : useStudyStore.getState().constellation.find(n => n.id === useStudyStore.getState().currentScope)?.title || "专业课程";

@@ -7,6 +7,7 @@
 .env.*
 !.env.example
 *.local
+!backend/Dockerfile.local
 
 # ---------- Python ----------
 __pycache__/
@@ -62,6 +63,7 @@ backend/chroma.log
 backend/eduweave_kb.db
 backend/*.db
 backend/app/resources/generated_*.json
+.local-build/
 *.sqlite
 *.sqlite3
 
@@ -83,7 +85,11 @@ desktop.ini
 *.swo
 *~
 
-# ---------- 交接临时目录 ----------
+# ---------- 交接临时目录与参赛文档 ----------
 .handover-backup/
 .git.backup/
 *.zip
+*.tar.gz
+*.pptx
+*.pdf
+server_init.sh

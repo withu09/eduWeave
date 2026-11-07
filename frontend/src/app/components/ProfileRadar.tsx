@@ -1,44 +1,28 @@
-import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer } from "recharts";
-import { profileRadar } from "../data";
+import { useEffect } from "react";
+import { useAdaptiveStore } from "../../store/adaptiveStore";
+import { useStudyStore } from "../store";
 
-// Six-dimension dynamic student profile (画像可视化)
 export function ProfileRadar() {
+  const { plan, loading, error, load } = useAdaptiveStore();
+  const scope = useStudyStore(state => state.currentScope);
+  useEffect(() => { if (!plan || plan.course_id !== scope) void load(scope); }, [scope, load]);
+  const summary = plan?.course_id === scope ? plan.summary : null;
   return (
-    <div className="rounded-2xl border border-border bg-card/80 p-5 backdrop-blur-xl relative overflow-hidden group">
-      <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-      <div className="relative z-10">
-        <div className="mb-1 flex items-center justify-between">
-          <h3 className="text-[15px] font-medium">六维动态画像</h3>
-          <span className="font-mono text-[10px] uppercase tracking-widest text-primary bg-primary/10 px-2 py-0.5 rounded-full">Profiler · live</span>
+    <section className="rounded-2xl border border-border bg-card/80 p-5">
+      <h3 className="text-sm font-medium">学习概况</h3>
+      <p className="mt-1 text-xs text-muted-foreground">来自已保存的测验记录</p>
+      {summary ? <>
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          {[
+            ["已掌握知识点", `${summary.mastered_nodes} / ${summary.total_nodes}`],
+            ["最近答题正确率", summary.recent_accuracy === null ? "暂无记录" : `${summary.recent_accuracy}%`],
+            ["已练习知识点", `${summary.practiced_nodes}`],
+            ["累计答题", `${summary.answered_count} 次`],
+          ].map(([label, value]) => <div key={label} className="rounded-xl bg-secondary/50 p-3"><div className="text-lg font-semibold text-primary">{value}</div><div className="mt-1 text-xs text-muted-foreground">{label}</div></div>)}
         </div>
-        <p className="mb-4 text-[11px] text-muted-foreground">随学随新 · 由画像分析 Agent 实时维护</p>
-        <div className="h-[210px] w-full" style={{ filter: 'drop-shadow(0 0 10px rgba(var(--primary-rgb), 0.3))' }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <RadarChart data={profileRadar} outerRadius="72%">
-              <PolarGrid stroke="rgba(140,150,220,0.15)" strokeDasharray="3 3" />
-              <PolarAngleAxis
-                dataKey="dim"
-                tick={{ fill: "var(--foreground)", fontSize: 11, fontFamily: "var(--font-body)", opacity: 0.8 }}
-              />
-              <Radar
-                dataKey="value"
-                stroke="var(--primary)"
-                fill="url(#colorUv)"
-                fillOpacity={0.4}
-                strokeWidth={2}
-                animationDuration={1200}
-                animationEasing="ease-out"
-              />
-              <defs>
-                <linearGradient id="colorUv" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.8}/>
-                  <stop offset="95%" stopColor="var(--primary)" stopOpacity={0.1}/>
-                </linearGradient>
-              </defs>
-            </RadarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-    </div>
+        <div className="mt-4 text-xs text-muted-foreground">课程掌握进度 {summary.progress}%</div>
+        <div className="mt-2 h-2 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-primary" style={{ width: `${summary.progress}%` }} /></div>
+      </> : <p className="mt-4 text-xs text-muted-foreground">{error || (loading ? "正在读取学习记录…" : "完成测验后显示学习概况。")}</p>}
+    </section>
   );
 }

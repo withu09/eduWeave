@@ -2,6 +2,11 @@ import os
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
+    LLM_PROVIDER: str = "xunfei"
+    DASHSCOPE_API_KEY: str = ""
+    DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    DASHSCOPE_MODEL: str = "deepseek-v4.1-flash-1017"
+
     XUNFEI_SPARK_APP_ID: str = os.getenv("XUNFEI_SPARK_APP_ID", "")
     XUNFEI_SPARK_API_KEY: str = os.getenv("XUNFEI_SPARK_API_KEY", "")
     XUNFEI_SPARK_API_SECRET: str = os.getenv("XUNFEI_SPARK_API_SECRET", "")

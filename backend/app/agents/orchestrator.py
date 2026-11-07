@@ -161,22 +161,42 @@ class SparkCompatTransport(httpx.AsyncHTTPTransport):
             
         return response
 
-# Initialize Pydantic AI provider and model pointing to Spark open API
-spark_provider = OpenAIProvider(
-    base_url=settings.XUNFEI_SPARK_BASE_URL,
-    api_key=f"{settings.XUNFEI_SPARK_API_KEY}:{settings.XUNFEI_SPARK_API_SECRET}" if settings.XUNFEI_SPARK_API_KEY and settings.XUNFEI_SPARK_API_SECRET else "placeholder",
-    http_client=httpx.AsyncClient(transport=SparkCompatTransport(), timeout=120.0)
-)
+async def require_bailian_key(request: httpx.Request):
+    """Allow interface preview without sending unconfigured model requests."""
+    if not settings.DASHSCOPE_API_KEY:
+        raise ValueError("请先在 .env.bailian 中填写 DASHSCOPE_API_KEY，再重新启动服务。")
 
-spark_model = OpenAIModel(
-    model_name=settings.XUNFEI_SPARK_MODEL,
-    provider=spark_provider
-)
+
+# Keep the existing export names so every agent shares the selected provider.
+# Bailian already returns OpenAI-compatible responses and must bypass Spark rewriting.
+if settings.LLM_PROVIDER.lower() in {"bailian", "dashscope", "aliyun"}:
+    spark_provider = OpenAIProvider(
+        base_url=settings.DASHSCOPE_BASE_URL,
+        api_key=settings.DASHSCOPE_API_KEY or "not-configured",
+        http_client=httpx.AsyncClient(timeout=120.0, event_hooks={"request": [require_bailian_key]}),
+    )
+    spark_model = OpenAIModel(
+        model_name=settings.DASHSCOPE_MODEL,
+        provider=spark_provider,
+        settings={"extra_body": {"enable_thinking": False}},
+    )
+elif settings.LLM_PROVIDER.lower() == "xunfei":
+    spark_provider = OpenAIProvider(
+        base_url=settings.XUNFEI_SPARK_BASE_URL,
+        api_key=f"{settings.XUNFEI_SPARK_API_KEY}:{settings.XUNFEI_SPARK_API_SECRET}" if settings.XUNFEI_SPARK_API_KEY and settings.XUNFEI_SPARK_API_SECRET else "placeholder",
+        http_client=httpx.AsyncClient(transport=SparkCompatTransport(), timeout=120.0),
+    )
+    spark_model = OpenAIModel(
+        model_name=settings.XUNFEI_SPARK_MODEL,
+        provider=spark_provider,
+    )
+else:
+    raise ValueError("LLM_PROVIDER must be bailian or xunfei")
 
 # Version-resilient Agent keyword arguments (pydantic-ai >= 0.8.0 uses output_type)
 agent_kwargs = {
     "model": spark_model,
-    "system_prompt": "You are the Director Agent. Based on the StudentProfile, output a concise StudyPlan listing course dependency nodes (maximum 2 to 3 nodes). You MUST select node names ONLY from the following allowed course topics: ['数据结构导论', '线性表与数组', '单链表基础', '双向链表', '循环链表', '栈与队列', '二叉树基础', '图论基础', '哈希表与散列']. You MUST call the final_result tool immediately to return the study plan. Do not ask for clarification or write plain text.",
+    "system_prompt": "You are the Director Agent. Based on the StudentProfile, output a concise StudyPlan listing course dependency nodes (maximum 2 to 3 nodes). Select node names only from the current course topics supplied in the request. Do not invent existing course nodes. You MUST call the final_result tool immediately to return the study plan. Do not ask for clarification or write plain text.",
     "retries": 3
 }
 

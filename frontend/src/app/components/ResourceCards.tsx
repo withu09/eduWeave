@@ -3,25 +3,26 @@ import { motion, AnimatePresence } from "motion/react";
 import { FileText, Network, ListChecks, Video, Code2, X, Download, FileType2, MessageSquareText, Loader2, Sparkles, BrainCircuit, Maximize, Minimize, Mic } from "lucide-react";
 import { useStudyStore } from "../store";
 import { MermaidRenderer } from "./MermaidRenderer";
-import { QuizRenderer, QuizQuestion } from "./QuizRenderer";
-import { CodeRenderer, CodeTask } from "./CodeRenderer";
+import { QuizRenderer } from "./QuizRenderer";
+import { PracticeRenderer } from "./PracticeRenderer";
 import { PresentationRenderer, PresentationData } from "./PresentationRenderer";
+import { API_BASE } from "../config";
 
-type TabKey = 'doc' | 'map' | 'quiz' | 'code' | 'video';
+type TabKey = 'doc' | 'map' | 'quiz' | 'code' | 'explain';
 
 const TABS: { key: TabKey; label: string; icon: any }[] = [
   { key: 'doc', label: '讲义', icon: FileText },
   { key: 'map', label: '导图', icon: Network },
   { key: 'quiz', label: '题库', icon: ListChecks },
-  { key: 'code', label: '代码', icon: Code2 },
+  { key: 'code', label: '实践练习', icon: BrainCircuit },
   { key: 'explain', label: '讲解', icon: Mic },
 ];
 
-export function ResourceCards({ nodeId, onClose }: { nodeId: string; onClose: () => void }) {
+export function ResourceCards({ nodeId, onClose, initialTab = 'doc' }: { nodeId: string; onClose: () => void; initialTab?: TabKey }) {
   const { constellation } = useStudyStore();
   const node = constellation.find((n) => n.id === nodeId) || { id: nodeId, title: '未知星球', chapter: '' };
   
-  const [activeTab, setActiveTab] = useState<TabKey>('doc');
+  const [activeTab, setActiveTab] = useState<TabKey>(initialTab);
   
   const [docs, setDocs] = useState<any[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(false);
@@ -33,19 +34,11 @@ export function ResourceCards({ nodeId, onClose }: { nodeId: string; onClose: ()
   const [isMapFullscreen, setIsMapFullscreen] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
 
-  const [quizData, setQuizData] = useState<QuizQuestion[]>([]);
-  const [loadingQuiz, setLoadingQuiz] = useState(false);
-  const [quizError, setQuizError] = useState<string | null>(null);
-
-  const [codeData, setCodeData] = useState<CodeTask | null>(null);
-  const [loadingCode, setLoadingCode] = useState(false);
-  const [codeError, setCodeError] = useState<string | null>(null);
-
   const [presData, setPresData] = useState<PresentationData | null>(null);
   const [loadingPres, setLoadingPres] = useState(false);
   const [presError, setPresError] = useState<string | null>(null);
 
-  const apiBaseUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+  const apiBaseUrl = API_BASE;
 
   // Fetch docs when node changes
   useEffect(() => {
@@ -68,12 +61,14 @@ export function ResourceCards({ nodeId, onClose }: { nodeId: string; onClose: ()
   }, [nodeId]);
 
   useEffect(() => {
+    if (activeTab !== 'map') return;
     const fetchMap = async () => {
       setLoadingMap(true);
       setMapError(null);
       try {
         const res = await fetch(`${apiBaseUrl}/api/kb/mermaid/${nodeId}`);
         const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Dify 资料生成未完成");
         if (data && data.error === "no_resources") {
           setMapError("no_resources");
         } else if (data && data.error) {
@@ -83,79 +78,13 @@ export function ResourceCards({ nodeId, onClose }: { nodeId: string; onClose: ()
         }
       } catch (e) {
         console.error("Failed to fetch node mermaid chart:", e);
-        setMapError("error");
+        setMapError(e instanceof Error ? e.message : "Dify 资料生成未完成");
       } finally {
         setLoadingMap(false);
       }
     };
     fetchMap();
-  }, [nodeId, apiBaseUrl]);
-
-  useEffect(() => {
-    setQuizData([]);
-    setQuizError(null);
-  }, [nodeId]);
-
-  useEffect(() => {
-    if (activeTab !== 'quiz') return;
-    if (quizData && quizData.length > 0) return;
-    if (quizError) return;
-
-    const fetchQuiz = async () => {
-      setLoadingQuiz(true);
-      setQuizError(null);
-      try {
-        const res = await fetch(`${apiBaseUrl}/api/kb/quiz/${nodeId}`);
-        const data = await res.json();
-        if (data && data.error === "no_resources") {
-          setQuizError("no_resources");
-        } else if (data && data.error) {
-          setQuizError(data.error);
-        } else if (data && data.questions) {
-          setQuizData(data.questions);
-        }
-      } catch (e) {
-        console.error("Failed to fetch node quiz:", e);
-        setQuizError("error");
-      } finally {
-        setLoadingQuiz(false);
-      }
-    };
-    fetchQuiz();
-  }, [nodeId, activeTab, apiBaseUrl, quizData, quizError]);
-
-  useEffect(() => {
-    setCodeData(null);
-    setCodeError(null);
-  }, [nodeId]);
-
-  useEffect(() => {
-    if (activeTab !== 'code') return;
-    if (codeData) return;
-    if (codeError) return;
-
-    const fetchCode = async () => {
-      setLoadingCode(true);
-      setCodeError(null);
-      try {
-        const res = await fetch(`${apiBaseUrl}/api/kb/code/${nodeId}`);
-        const data = await res.json();
-        if (data && data.error === "no_resources") {
-          setCodeError("no_resources");
-        } else if (data && data.error) {
-          setCodeError(data.error);
-        } else if (data && data.task) {
-          setCodeData(data.task);
-        }
-      } catch (e) {
-        console.error("Failed to fetch node code task:", e);
-        setCodeError("error");
-      } finally {
-        setLoadingCode(false);
-      }
-    };
-    fetchCode();
-  }, [nodeId, activeTab, apiBaseUrl, codeData, codeError]);
+  }, [nodeId, apiBaseUrl, activeTab]);
 
   useEffect(() => {
     setPresData(null);
@@ -173,6 +102,7 @@ export function ResourceCards({ nodeId, onClose }: { nodeId: string; onClose: ()
       try {
         const res = await fetch(`${apiBaseUrl}/api/kb/presentation/${nodeId}`);
         const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Dify 资料生成未完成");
         if (data && data.error === "no_resources") {
           setPresError("no_resources");
         } else if (data && data.error) {
@@ -182,25 +112,13 @@ export function ResourceCards({ nodeId, onClose }: { nodeId: string; onClose: ()
         }
       } catch (e) {
         console.error("Failed to fetch presentation:", e);
-        setPresError("error");
+        setPresError(e instanceof Error ? e.message : "Dify 资料生成未完成");
       } finally {
         setLoadingPres(false);
       }
     };
     fetchPres();
   }, [nodeId, activeTab, apiBaseUrl, presData, presError]);
-
-  const fetchMoreQuiz = async () => {
-    try {
-      const res = await fetch(`${apiBaseUrl}/api/kb/quiz/${nodeId}/more`, { method: "POST" });
-      const data = await res.json();
-      if (data && data.questions) {
-        setQuizData(data.questions);
-      }
-    } catch (e) {
-      console.error("Failed to fetch more quiz:", e);
-    }
-  };
 
   return (
     <motion.div
@@ -220,7 +138,7 @@ export function ResourceCards({ nodeId, onClose }: { nodeId: string; onClose: ()
               {node.title} · 融合资源卡
             </h3>
           </div>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-[#9aa0c8] transition hover:bg-white/10 hover:text-white">
+          <button aria-label="关闭学习资料" onClick={onClose} className="rounded-lg p-1.5 text-[#9aa0c8] transition hover:bg-white/10 hover:text-white">
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -331,7 +249,7 @@ export function ResourceCards({ nodeId, onClose }: { nodeId: string; onClose: ()
                   ) : mapError ? (
                     <div className="flex flex-col items-center justify-center text-center max-w-md px-6">
                       <Network className="h-10 w-10 text-red-500/50 mb-3 mx-auto" />
-                      <p className="text-[13px] text-red-400">AI 提炼失败或服务不可用，请稍后重试。</p>
+                      <p className="text-[13px] text-red-400">{mapError}</p>
                     </div>
                   ) : mapChart ? (
                     <MermaidRenderer chart={mapChart} />
@@ -358,63 +276,19 @@ export function ResourceCards({ nodeId, onClose }: { nodeId: string; onClose: ()
             {activeTab === 'quiz' && (
               <motion.div key="quiz" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 flex p-5">
                 <div className="w-full h-full rounded-xl border border-[rgba(140,150,220,0.18)] bg-[#0a0c1a]/50 p-6 flex flex-col relative overflow-hidden overflow-y-auto">
-                  {loadingQuiz ? (
-                    <div className="flex h-full flex-col items-center justify-center gap-4 text-[13px] text-muted-foreground">
-                      <Loader2 className="h-6 w-6 animate-spin text-[#8b7dff]" />
-                      AI 正在研读讲义并针对您的弱点现场出卷，请耐心等待 10~20 秒...
-                    </div>
-                  ) : quizError === "no_resources" ? (
-                    <div className="flex h-full flex-col items-center justify-center text-center max-w-md mx-auto px-6">
-                      <ListChecks className="h-10 w-10 text-muted-foreground/30 mb-3" />
-                      <p className="text-[13px] text-muted-foreground">暂无题库数据。请先在左侧「讲义」页面上传相关的节点学习资料，AI 才可出题。</p>
-                    </div>
-                  ) : quizError ? (
-                    <div className="flex h-full flex-col items-center justify-center text-center max-w-md mx-auto px-6">
-                      <ListChecks className="h-10 w-10 text-red-500/50 mb-3" />
-                      <p className="text-[13px] text-red-400">题库生成失败或服务不可用，请稍后重试。</p>
-                    </div>
-                  ) : quizData && quizData.length > 0 ? (
-                    <QuizRenderer questions={quizData} onLoadMore={fetchMoreQuiz} />
-                  ) : (
-                    <div className="flex h-full flex-col items-center justify-center text-center">
-                      <ListChecks className="h-10 w-10 text-muted-foreground/30 mb-3" />
-                      <p className="text-[13px] text-muted-foreground">暂无题目。</p>
-                    </div>
-                  )}
+                  <QuizRenderer nodeId={nodeId} />
                 </div>
               </motion.div>
             )}
 
             {activeTab === 'code' && (
               <motion.div key="code" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 flex p-5">
-                <div className="w-full h-full rounded-xl border border-[rgba(140,150,220,0.18)] bg-[#0a0c1a]/50 p-4 flex flex-col relative overflow-hidden">
-                  {loadingCode ? (
-                    <div className="flex h-full flex-col items-center justify-center gap-4 text-[13px] text-muted-foreground">
-                      <Loader2 className="h-6 w-6 animate-spin text-[#8b7dff]" />
-                      AI 正在为您生成互动代码实战，请耐心等待 10~20 秒...
-                    </div>
-                  ) : codeError === "no_resources" ? (
-                    <div className="flex h-full flex-col items-center justify-center text-center max-w-md mx-auto px-6">
-                      <Code2 className="h-10 w-10 text-muted-foreground/30 mb-3" />
-                      <p className="text-[13px] text-muted-foreground">暂无代码实战数据。请先在左侧「讲义」页面上传相关资料，AI 才可生成实战任务。</p>
-                    </div>
-                  ) : codeError ? (
-                    <div className="flex h-full flex-col items-center justify-center text-center max-w-md mx-auto px-6">
-                      <Code2 className="h-10 w-10 text-red-500/50 mb-3" />
-                      <p className="text-[13px] text-red-400">实战任务生成失败或服务不可用，请稍后重试。</p>
-                    </div>
-                  ) : codeData ? (
-                    <CodeRenderer task={codeData} />
-                  ) : (
-                    <div className="flex h-full flex-col items-center justify-center text-center">
-                      <Code2 className="h-10 w-10 text-muted-foreground/30 mb-3" />
-                      <p className="text-[13px] text-muted-foreground">暂无实战任务。</p>
-                    </div>
-                  )}
+                <div className="w-full h-full rounded-xl border border-[rgba(140,150,220,0.18)] bg-[#0a0c1a]/50 p-4 overflow-hidden">
+                  <PracticeRenderer nodeId={nodeId} />
                 </div>
               </motion.div>
             )}
-            
+
             {activeTab === 'explain' && (
               <motion.div key="explain" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 flex p-5">
                 <div className="w-full h-full rounded-xl border border-[rgba(140,150,220,0.18)] bg-[#0a0c1a]/50 p-4 flex flex-col relative overflow-hidden">

@@ -40,7 +40,7 @@ export function RadarModule() {
             <span className="flex h-7 w-7 items-center justify-center rounded-full" style={{ background: "linear-gradient(135deg, var(--star-glow), var(--star-cyan))" }}>
               <RadarIcon className="h-4 w-4 text-white" />
             </span>
-            <span className="text-[12px]">六维画像</span>
+            <span className="text-[12px]">学习概况</span>
           </motion.button>
         )}
       </AnimatePresence>

@@ -1,186 +1,261 @@
-import { useEffect, useRef, useState } from "react";
-import { BarChart, Bar, XAxis, ResponsiveContainer, Cell, LabelList } from "recharts";
-import { Cpu, Activity, Coins, Gauge, ShieldAlert } from "lucide-react";
-import { agents } from "../data";
-import { useConsoleStore } from "../../store/consoleStore";
+import { useEffect, useMemo, useState } from "react";
+import { Cpu, Activity, Coins, Clock, RefreshCw, Network, BarChart3 } from "lucide-react";
+import { API_BASE, wsUrl } from "../config";
 import { useRobustWebSocket } from "../../hooks/useRobustWebSocket";
 import { ConsoleGraph } from "./ConsoleGraph";
 
-// 智能协同控制台 — multi-agent collaboration monitor.
+interface Call {
+  id: string;
+  agent: string;
+  task: string;
+  status: "running" | "completed" | "error" | "cancelled";
+  started_at: string;
+  finished_at?: string;
+  duration_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  model: string;
+  error_type?: string;
+}
+
+const labels = { running: "处理中", completed: "已完成", error: "失败", cancelled: "已取消" };
+
+function mergeCalls(previous: Call[], incoming: Call[]): Call[] {
+  const records = new Map(previous.map((call) => [call.id, call]));
+  for (const call of incoming) {
+    const old = records.get(call.id);
+    if (!old?.finished_at || call.finished_at) records.set(call.id, call);
+  }
+  return [...records.values()]
+    .sort((a, b) => b.started_at.localeCompare(a.started_at))
+    .slice(0, 100);
+}
+
 export function ConsoleView() {
-  const { thoughts: log, agentStatuses, tokenUsage: tokensState, ragMetrics, addThought, updateAgentStatus, updateTokenUsage, updateRagMetrics, clearConsole } = useConsoleStore();
-  const [agentsState, setAgentsState] = useState(agents);
-  
-  const scroller = useRef<HTMLDivElement>(null);
+  const [calls, setCalls] = useState<Call[]>([]);
+  const [wsStatuses, setWsStatuses] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  // Sync static agent info with dynamic status from store
-  useEffect(() => {
-    setAgentsState(agents.map(a => ({
-      ...a,
-      status: agentStatuses[a.role] || 'idle'
-    })));
-  }, [agentStatuses]);
-
-  const handleMessage = (payload: any) => {
-    if (payload.type === 'thought') {
-      addThought(payload.data);
-    } else if (payload.type === 'agent_status') {
-      updateAgentStatus(payload.data.name, payload.data.status);
-    } else if (payload.type === 'token_usage') {
-      updateTokenUsage(payload.data.agent, {
-        prompt_tokens: payload.data.tokens / 2,
-        completion_tokens: payload.data.tokens / 2,
-        total_tokens: payload.data.tokens
-      });
-    } else if (payload.type === 'rag_metrics') {
-      updateRagMetrics({
-        hitRate: payload.data.hitRate,
-        latency: payload.data.latency
-      });
+  const load = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/console/calls`, { cache: "no-store" });
+      if (!response.ok) throw new Error("调用记录加载失败，请稍后重试");
+      const data = await response.json();
+      setCalls((previous) => mergeCalls(previous, data.calls));
+      setError("");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "读取失败");
+    } finally {
+      setLoading(false);
     }
   };
 
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.location.hostname;
-  const wsUrl = `${protocol}//${host}:8000/api/console/ws`;
-
-  const { isConnected, sendMessage } = useRobustWebSocket({
-    url: wsUrl,
-    onMessage: handleMessage
+  const { isConnected } = useRobustWebSocket({
+    url: wsUrl("/api/console/ws"),
+    onMessage: (payload) => {
+      if (payload.type === "call") {
+        setCalls((previous) => mergeCalls(previous, [payload.data]));
+      } else if (payload.type === "agent_status" && payload.data?.name) {
+        setWsStatuses((prev) => ({ ...prev, [payload.data.name]: payload.data.status }));
+      }
+    },
   });
 
   useEffect(() => {
-    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
-  }, [log]);
+    void load();
+    const timer = setInterval(() => void load(), 10000);
+    return () => clearInterval(timer);
+  }, []);
 
-  const handleKill = async () => {
-    try {
-      await fetch(`${protocol}//${host}:8000/api/console/kill`, { method: 'POST' });
-      addThought({ id: Date.now().toString(), agent: 'System', message: '收到终止信号，所有运行中的 Agent 已强制中断。', timestamp: new Date().toLocaleTimeString() });
-      updateAgentStatus('Writer', 'idle');
-      updateAgentStatus('Presenter', 'idle');
-      updateAgentStatus('Coder', 'idle');
-    } catch (e) {
-      console.error(e);
+  const completed = calls.filter((call) => call.status === "completed");
+  const timed = completed.filter((call) => call.duration_ms !== null);
+  const average = timed.length
+    ? (timed.reduce((sum, call) => sum + (call.duration_ms ?? 0), 0) / timed.length / 1000).toFixed(2) + " 秒"
+    : "暂无记录";
+  const tokens = calls.reduce((sum, call) => sum + (call.total_tokens ?? 0), 0);
+
+  const { agentStatuses, callCounts, tokenByAgent } = useMemo(() => {
+    const statuses: Record<string, string> = { ...wsStatuses };
+    const counts: Record<string, number> = {};
+    const tokMap: Record<string, number> = {};
+    for (const c of calls) {
+      counts[c.agent] = (counts[c.agent] || 0) + 1;
+      tokMap[c.agent] = (tokMap[c.agent] || 0) + (c.total_tokens ?? 0);
+      if (c.status === "running") {
+        statuses[c.agent] = "working";
+      } else if (!statuses[c.agent]) {
+        statuses[c.agent] = "idle";
+      }
     }
-  };
+    return { agentStatuses: statuses, callCounts: counts, tokenByAgent: tokMap };
+  }, [calls, wsStatuses]);
 
-  const activeCount = agentsState.filter(a => a.status !== 'idle').length;
-  const totalTokensRaw = Object.values(tokensState).reduce((sum, item) => sum + (item.total_tokens || 0), 0);
-  const totalTokens = (totalTokensRaw / 1000).toFixed(1) + 'k';
-
-  // Format token chart data
-  const chartData = agentsState.map(a => ({
-    agent: a.name,
-    tokens: tokensState[a.role]?.total_tokens || 0
-  }));
+  const maxAgentTokens = Math.max(1, ...Object.values(tokenByAgent));
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-y-auto pr-1">
-      <Header icon={Cpu} title="智能协同控制台" sub="Multi-Agent Console · LangGraph State Machine" />
+    <div className="flex h-full flex-col gap-4 overflow-y-auto pr-1 pb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <Cpu className="h-8 w-8 text-primary" />
+          <div>
+            <h2 className="text-xl font-semibold">智能协同控制台</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              多智能体实时拓扑 · 真实调用实例 · {isConnected ? "实时连接正常" : "定时更新中"}
+            </p>
+          </div>
+        </div>
+        <button
+          aria-label="刷新调用记录"
+          onClick={() => void load()}
+          disabled={loading}
+          className="rounded-xl border border-border p-2 transition hover:bg-secondary"
+        >
+          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+        </button>
+      </div>
+
+      {error && (
+        <p role="alert" className="rounded-xl border border-destructive/40 p-3 text-sm text-destructive">
+          {error}
+        </p>
+      )}
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat icon={Activity} label="活跃 Agent" value={`${activeCount} / ${agentsState.length}`} tint={isConnected ? "var(--primary)" : "var(--muted-foreground)"} />
-        <Stat icon={Coins} label="Token 消耗" value={totalTokens} tint="var(--primary)" />
-        <Stat icon={Gauge} label="RAG 平均时延" value={ragMetrics.latency > 0 ? `${ragMetrics.latency.toFixed(2)}s` : "0.00s"} tint="#7ce0b0" />
-        <Stat icon={ShieldAlert} label="RAG 命中率" value={ragMetrics.hitRate > 0 ? `${(ragMetrics.hitRate * 100).toFixed(0)}%` : "0%"} tint="var(--destructive)" />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* React Flow Graph */}
-        <section className="h-[250px] rounded-2xl border border-border bg-card overflow-hidden backdrop-blur-xl">
-          <ConsoleGraph />
-        </section>
-        <section className="rounded-2xl border border-border bg-card p-4 backdrop-blur-xl">
-          <h3 className="mb-3 text-[14px]">智能体状态矩阵</h3>
-          <div className="grid grid-cols-2 gap-2.5">
-            {agentsState.map((a) => (
-              <div key={a.role} className="rounded-xl border border-border bg-secondary/30 p-3">
-                <div className="flex items-center justify-between">
-                  <span className="flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full" style={{ background: a.color, boxShadow: a.status !== "idle" ? `0 0 8px ${a.color}` : "none" }} />
-                    <span className="text-[13px]">{a.name}</span>
-                  </span>
-                  <span className="font-mono text-[9px] uppercase text-muted-foreground">{a.status}</span>
-                </div>
-                <div className="mt-1 font-mono text-[10px] text-muted-foreground">{a.role} Agent</div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* token chart */}
-        <section className="rounded-2xl border border-border bg-card p-4 backdrop-blur-xl">
-          <h3 className="mb-3 text-[14px]">Token 消耗分布</h3>
-          <div className="h-[200px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData}>
-                <XAxis dataKey="agent" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} axisLine={false} tickLine={false} />
-                <Bar dataKey="tokens" radius={[6, 6, 0, 0]}>
-                  {chartData.map((_, i) => (
-                    <Cell key={i} fill={["var(--primary)", "var(--primary)", "#7ce0b0", "var(--destructive)", "#f2c879", "var(--destructive)"][i % 6]} />
-                  ))}
-                  <LabelList dataKey="tokens" position="top" fill="var(--muted-foreground)" fontSize={10} formatter={(val: number) => val > 0 ? (val >= 1000 ? (val/1000).toFixed(1) + 'k' : val) : ''} />
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
-      </div>
-
-      {/* Control Panel */}
-      <section className="flex gap-3">
-        <button onClick={clearConsole} className="px-4 py-2 rounded-lg bg-secondary text-xs hover:bg-secondary/80 transition-colors">
-          清空控制台
-        </button>
-        <button onClick={handleKill} disabled={activeCount === 0} className="px-4 py-2 rounded-lg bg-destructive text-destructive-foreground text-xs hover:bg-destructive/90 transition-colors disabled:opacity-50">
-          强制中断 (Kill Task)
-        </button>
-      </section>
-
-      {/* thought stream */}
-      <section className="rounded-2xl border border-border bg-card p-4 backdrop-blur-xl">
-        <h3 className="mb-3 flex items-center gap-2 text-[14px]">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--destructive)]" /> 智能体思绪流 · Live
-        </h3>
-        <div ref={scroller} className="max-h-[220px] space-y-2 overflow-y-auto rounded-xl border border-border bg-input-background p-3">
-          {log.map((l, i) => (
-            <div key={i} className="font-mono text-[11px] leading-relaxed">
-              <span className="text-muted-foreground">{l.t} </span>
-              <span className="text-[var(--primary)]">[{l.agent}]</span>{" "}
-              <span className="text-foreground/80">{l.text}</span>
+        {[
+          [Activity, "进行中的任务", String(calls.filter((call) => call.status === "running").length)],
+          [Cpu, "已记录调用", String(calls.length)],
+          [Coins, "已上报 Token 总数", tokens.toLocaleString()],
+          [Clock, "完成调用平均耗时", average],
+        ].map(([Icon, label, value]) => {
+          const MetricIcon = Icon as typeof Cpu;
+          return (
+            <div key={String(label)} className="rounded-2xl border border-border bg-card/80 p-4">
+              <MetricIcon className="mb-2 h-4 w-4 text-primary" />
+              <div className="text-xl font-semibold">{String(value)}</div>
+              <p className="mt-1 text-xs text-muted-foreground">{String(label)}</p>
             </div>
-          ))}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function liveTime() {
-  return new Date().toLocaleTimeString("zh-CN", { hour12: false });
-}
-
-function Header({ icon: Icon, title, sub }: { icon: typeof Cpu; title: string; sub: string }) {
-  return (
-    <div className="flex items-center gap-3">
-      <span className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ background: "linear-gradient(135deg, var(--primary), var(--destructive))" }}>
-        <Icon className="h-5 w-5 text-white" />
-      </span>
-      <div>
-        <h2 className="text-[18px] leading-tight">{title}</h2>
-        <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">{sub}</p>
+          );
+        })}
       </div>
-    </div>
-  );
-}
 
-function Stat({ icon: Icon, label, value, tint }: { icon: typeof Cpu; label: string; value: string; tint: string }) {
-  return (
-    <div className="rounded-2xl border border-border bg-card p-3.5 backdrop-blur-xl">
-      <Icon className="mb-2 h-4 w-4" style={{ color: tint }} />
-      <div className="text-[20px] leading-none" style={{ fontFamily: "var(--font-display)" }}>{value}</div>
-      <div className="mt-1 text-[11px] text-muted-foreground">{label}</div>
+      {/* Multi-Agent Topology Graph + Token Distribution */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="flex flex-col gap-2 rounded-2xl border border-border bg-card/80 p-4 lg:col-span-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Network className="h-4 w-4 text-primary" />
+              <span>多智能体协同拓扑图 (Multi-Agent DAG)</span>
+            </div>
+            <span className="font-mono text-[10px] text-muted-foreground">
+              状态联动：伴学 / 建课 / 讲义 / 测验 / 实训 / 讲解
+            </span>
+          </div>
+          <ConsoleGraph agentStatuses={agentStatuses} callCounts={callCounts} />
+        </div>
+
+        <div className="flex flex-col justify-between rounded-2xl border border-border bg-card/80 p-4">
+          <div>
+            <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+              <BarChart3 className="h-4 w-4 text-primary" />
+              <span>各智能体 Token 消耗与调用分布</span>
+            </div>
+            {Object.keys(callCounts).length === 0 ? (
+              <div className="py-12 text-center text-xs text-muted-foreground">
+                暂无智能体调用数据，触发 AI 伴学或知识节点生成后自动统计
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {Object.entries(callCounts).map(([agent, count]) => {
+                  const agentTok = tokenByAgent[agent] || 0;
+                  const pct = Math.max(8, Math.round((agentTok / maxAgentTokens) * 100));
+                  const running = agentStatuses[agent] === "working";
+                  return (
+                    <div key={agent} className="space-y-1">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-medium text-foreground">
+                          {agent}
+                          {running && <span className="ml-1.5 text-[10px] text-primary">● 处理中</span>}
+                        </span>
+                        <span className="font-mono text-[11px] text-muted-foreground">
+                          {count} 次 · {agentTok.toLocaleString()} tok
+                        </span>
+                      </div>
+                      <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
+                        <div
+                          className="h-full rounded-full transition-all duration-500"
+                          style={{
+                            width: `${pct}%`,
+                            background: "linear-gradient(90deg, var(--primary), var(--accent))",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <p className="mt-4 border-t border-border pt-3 text-[11px] leading-relaxed text-muted-foreground">
+            展示最近最多 100 次实际模型调用。耗时来自实际执行计时，Token 来自百炼/星火大模型真实返回；读取缓存不增加模型调用数。
+          </p>
+        </div>
+      </div>
+
+      {calls.length === 0 ? (
+        <div className="rounded-2xl border border-border bg-card/80 p-10 text-center text-sm text-muted-foreground">
+          {loading ? "正在读取调用记录…" : "暂时没有实际调用。发送 AI 伴学消息、生成测验或实践练习后，这里会显示执行记录。"}
+        </div>
+      ) : (
+        <section className="overflow-x-auto rounded-2xl border border-border bg-card/80">
+          <table className="w-full min-w-[780px] text-left text-xs">
+            <thead className="border-b border-border text-muted-foreground">
+              <tr>
+                {["智能体 / 时间", "实际任务", "状态", "耗时", "输入 / 输出 Token", "总 Token"].map((label) => (
+                  <th key={label} className="px-4 py-3 font-medium">
+                    {label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {calls.map((call) => (
+                <tr key={call.id} className="border-b border-border last:border-0">
+                  <td className="px-4 py-3">
+                    <div className="font-medium">{call.agent}</div>
+                    <div className="mt-1 text-muted-foreground">{new Date(call.started_at).toLocaleTimeString()}</div>
+                  </td>
+                  <td className="max-w-xs px-4 py-3">
+                    <div className="break-words leading-relaxed">{call.task}</div>
+                    <div className="mt-1 text-[10px] text-muted-foreground">{call.model}</div>
+                  </td>
+                  <td
+                    className={`px-4 py-3 ${
+                      call.status === "error"
+                        ? "text-destructive"
+                        : call.status === "running"
+                          ? "text-primary"
+                          : "text-muted-foreground"
+                    }`}
+                  >
+                    {labels[call.status]}
+                    {call.error_type && <div className="mt-1 text-[10px]">{call.error_type}</div>}
+                  </td>
+                  <td className="px-4 py-3">
+                    {call.duration_ms === null ? "—" : `${(call.duration_ms / 1000).toFixed(2)} 秒`}
+                  </td>
+                  <td className="px-4 py-3">
+                    {call.input_tokens ?? "—"} / {call.output_tokens ?? "—"}
+                  </td>
+                  <td className="px-4 py-3">{call.total_tokens ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
     </div>
   );
 }

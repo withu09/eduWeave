@@ -1,724 +1,430 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from pydantic import BaseModel
-from typing import List, Dict, Any
-from app.utils.dify_client import create_dataset, upload_document, delete_dataset, delete_document
-import app.utils.kb_db as kb_db
-from datetime import datetime
-from app.utils.task_manager import task_manager
 import asyncio
+import json
+import mimetypes
+import os
+import re
+import uuid
+from datetime import datetime
+from pathlib import Path
 
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+from app.agents.deps import AgentDeps
+from app.schemas.profile import StudentProfile
+from app.utils import dify_client as dify, kb_db
+from app.utils.knowledge import ensure_dataset, is_remote, node_materials, refresh_resources, resource_state
+from app.utils.task_manager import task_manager
+from app.utils.telemetry import tracked_run
+
+# Keep these names available for integrations and isolated tests.
+create_dataset = dify.create_dataset
+upload_document = dify.upload_document
+delete_document = dify.delete_document
+delete_dataset = dify.delete_dataset
 router = APIRouter()
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+cache_lock = asyncio.Lock()
+
 
 class CreateCourseReq(BaseModel):
-    title: str
+    title: str = Field(min_length=1, max_length=300)
 
-class CreateModuleReq(BaseModel):
+
+class CreateModuleReq(CreateCourseReq):
     course_id: str
-    title: str
 
-class CreateNodeReq(BaseModel):
+
+class CreateNodeReq(CreateCourseReq):
     module_id: str
-    title: str
 
-class UpdateNodeReq(BaseModel):
-    title: str
+
+class UpdateNodeReq(CreateCourseReq):
+    pass
+
+
+class BindDatasetReq(BaseModel):
+    dataset_id: str = Field(min_length=1, max_length=100)
+
+
+def remote_error(error):
+    return HTTPException(502, str(error))
+
+
+@router.get("/api/kb/status")
+async def knowledge_status():
+    return {"provider": "dify", "configured": dify.configured(), "indexing_technique": os.getenv("DIFY_INDEXING_TECHNIQUE", "economy")}
+
+
+@router.post("/api/kb/test-connection")
+async def test_knowledge_connection():
+    if not dify.configured():
+        raise HTTPException(409, "请先在 .env.bailian 填写 DIFY_API_KEY，并重新加载项目配置")
+    try:
+        await asyncio.to_thread(dify.get_datasets, limit=1)
+        return {"connected": True, "provider": "dify"}
+    except dify.DifyError as error:
+        raise remote_error(error)
+
+
+@router.get("/api/kb/datasets")
+async def list_dify_datasets():
+    if not dify.configured():
+        return {"datasets": []}
+    try:
+        items = []
+        page = 1
+        while True:
+            result = await asyncio.to_thread(dify.get_datasets, page=page, limit=100)
+            items.extend({"id": item["id"], "name": item.get("name", "未命名")} for item in result.get("data", []))
+            if not result.get("has_more"):
+                break
+            page += 1
+        return {"datasets": items}
+    except dify.DifyError as error:
+        raise remote_error(error)
+
+
+@router.post("/api/kb/courses/{course_id}/bind-dify")
+async def bind_dify_dataset(course_id: str, req: BindDatasetReq):
+    try:
+        await asyncio.to_thread(dify.get_dataset_detail, req.dataset_id)
+    except dify.DifyError as error:
+        raise remote_error(error)
+    with kb_db.SessionLocal() as db:
+        course = db.get(kb_db.Course, course_id)
+        if course is None:
+            raise HTTPException(404, "课程不存在")
+        remote = db.query(kb_db.Resource).join(kb_db.Node).join(kb_db.Module).filter(kb_db.Module.course_id == course_id).all()
+        if course.dify_dataset_id != req.dataset_id and any(is_remote(item.dify_document_id) for item in remote):
+            raise HTTPException(409, "课程已有 Dify 资料，不能直接切换知识库；请为另一知识库创建课程")
+        course.dify_dataset_id = req.dataset_id
+        db.commit()
+    return {"status": "success", "dataset_id": req.dataset_id}
+
 
 @router.get("/api/kb/tree")
 async def get_kb_tree():
-    """Return the Knowledge Base Tree from local DB."""
     return {"tree": kb_db.get_tree()}
+
 
 @router.patch("/api/kb/tree/{node_type}/{node_id}")
 async def update_tree_node(node_type: str, node_id: str, req: UpdateNodeReq):
-    try:
-        dify_dataset_id = kb_db.update_tree_node(node_id, req.title)
-        if node_type == "course" and dify_dataset_id:
-            from app.utils.dify_client import update_dataset
-            try:
-                update_dataset(dify_dataset_id, name=req.title)
-            except Exception as e:
-                print(f"Warning: Failed to update Dify dataset name: {e}")
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    dataset_id = kb_db.update_tree_node(node_id, req.title)
+    if node_type == "course" and dataset_id and dify.configured():
+        try:
+            await asyncio.to_thread(dify.update_dataset, dataset_id, req.title)
+        except dify.DifyError as error:
+            raise remote_error(error)
+    return {"status": "success"}
+
 
 @router.post("/api/kb/sync")
 async def sync_kb_from_dify():
-    """Fetches all datasets from Dify and syncs them into the local tree."""
+    if not dify.configured():
+        return {"status": "not_configured", "tree": kb_db.get_tree()}
     try:
-        from app.utils.dify_client import get_datasets
-        # Fetch up to 100 datasets from Dify
-        res = get_datasets(limit=100)
-        datasets = res.get("data", [])
+        datasets = []
+        page = 1
+        while True:
+            result = await asyncio.to_thread(dify.get_datasets, page=page, limit=100)
+            datasets.extend(result.get("data", []))
+            if not result.get("has_more"):
+                break
+            page += 1
         kb_db.sync_from_dify(datasets)
         return {"status": "success", "tree": kb_db.get_tree()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except dify.DifyError as error:
+        raise remote_error(error)
+
 
 @router.post("/api/kb/courses")
 async def create_course(req: CreateCourseReq):
     try:
-        # Create dataset in Dify
-        dataset_id = create_dataset(req.title)
-        # Save to local DB
-        course = kb_db.add_course(req.title, dataset_id)
-        return course
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        dataset_id = await asyncio.to_thread(create_dataset, req.title) if dify.configured() else None
+        return kb_db.add_course(req.title, dataset_id)
+    except dify.DifyError as error:
+        raise remote_error(error)
+
 
 @router.post("/api/kb/modules")
 async def create_module(req: CreateModuleReq):
-    try:
-        mod = kb_db.add_module(req.course_id, req.title)
-        return mod
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    return kb_db.add_module(req.course_id, req.title)
+
 
 @router.post("/api/kb/nodes")
 async def create_node(req: CreateNodeReq):
-    try:
-        node = kb_db.add_node(req.module_id, req.title)
-        return node
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    return kb_db.add_node(req.module_id, req.title)
+
 
 @router.delete("/api/kb/tree/{node_type}/{node_id}")
-async def delete_tree_node(node_type: str, node_id: str):
-    try:
-        dify_dataset_id = kb_db.delete_tree_node(node_id, node_type)
-        if node_type == "course" and dify_dataset_id:
-            # Cleanup in Dify
-            try:
-                delete_dataset(dify_dataset_id)
-            except Exception as e:
-                print(f"Warning: Failed to delete dify dataset: {e}")
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def delete_tree_node(node_id: str, node_type: str):
+    # Remove the remote dataset only after a successful request, keeping the
+    # local tree available for retry if the service is unreachable.
+    dataset_id = kb_db.get_dataset_id_for_course(node_id) if node_type == "course" else None
+    with kb_db.SessionLocal() as db:
+        shared = bool(dataset_id and db.query(kb_db.Course).filter(kb_db.Course.dify_dataset_id == dataset_id, kb_db.Course.id != node_id).first())
+    if dataset_id and not shared and dify.configured():
+        try:
+            await asyncio.to_thread(delete_dataset, dataset_id)
+        except dify.DifyError as error:
+            raise remote_error(error)
+    kb_db.delete_tree_node(node_id, node_type)
+    return {"status": "success"}
+
 
 @router.get("/api/kb/resources/{node_id}")
 async def get_kb_resources(node_id: str):
-    """Return resources for a specific node."""
-    kb_db.complete_processing() # simulate fast processing
-    resources = kb_db.get_resources(node_id)
-    return {"resources": resources}
-
-import asyncio
-import os
-import chromadb
-from fastapi.responses import FileResponse
-from app.utils.dify_client import get_document_embedding_status, get_segments
-
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-async def sync_dify_segments(dataset_id: str, document_id: str, node_id: str):
-    """Polls Dify for processing completion, then fetches segments and syncs to local ChromaDB."""
-    import time
-    max_retries = 30
-    for _ in range(max_retries):
-        status_res = get_document_embedding_status(dataset_id, document_id)
-        if status_res and isinstance(status_res, list) and len(status_res) > 0:
-            status = status_res[0].get("indexing_status", "")
-            if status == "completed":
-                break
-            elif status == "error":
-                print(f"[Sync] Dify processing error for {document_id}")
-                return
-        await asyncio.sleep(2)
-        
-    # Fetch segments
-    segments_res = get_segments(dataset_id, document_id)
-    segments = segments_res.get("data", [])
-    if not segments:
-        print(f"[Sync] No segments found for {document_id}")
-        return
-        
-    # Sync to ChromaDB
+    warning = None
     try:
-        chroma_client = chromadb.HttpClient(host=os.getenv("CHROMA_HOST", "localhost"), port=int(os.getenv("CHROMA_PORT", "8001")))
-        collection = chroma_client.get_or_create_collection("dsa")
-        docs = []
-        metadatas = []
-        ids = []
-        for i, seg in enumerate(segments):
-            content = seg.get("content", "")
-            if content.strip():
-                docs.append(content)
-                metadatas.append({"node_id": node_id, "document_id": document_id})
-                ids.append(f"{document_id}_{i}")
-        if docs:
-            collection.add(documents=docs, metadatas=metadatas, ids=ids)
-            print(f"[Sync] Successfully synced {len(docs)} segments to local ChromaDB for node {node_id}")
-    except Exception as e:
-        print(f"[Sync] Failed to sync to ChromaDB: {e}")
+        await asyncio.to_thread(refresh_resources, node_id)
+    except dify.DifyError as error:
+        warning = str(error)
+    resources = kb_db.get_resources(node_id)
+    for resource in resources:
+        resource["provider"] = "dify" if is_remote(resource["id"]) else "local"
+        if resource["provider"] == "local":
+            resource["status"] = "local"
+    return {"resources": resources, "warning": warning}
+
+
+async def sync_dify_segments(dataset_id, document_id, node_id, batch=None):
+    # Dify owns parsing and retrieval. No copy to a separate Chroma collection.
+    for _ in range(90):
+        try:
+            if batch:
+                result = await asyncio.to_thread(dify.get_document_embedding_status, dataset_id, batch)
+                detail = next((item for item in result.get("data", []) if item.get("id") == document_id), {})
+            else:
+                detail = await asyncio.to_thread(dify.get_document_detail, dataset_id, document_id)
+            status = resource_state(detail)
+            with kb_db.SessionLocal() as db:
+                resource = db.query(kb_db.Resource).filter_by(node_id=node_id, dify_document_id=document_id).first()
+                if resource is None:
+                    return
+                resource.status = status
+                db.commit()
+            if status in {"completed", "error", "paused"}:
+                return
+        except dify.DifyError:
+            return
+        await asyncio.sleep(2)
+
+
+def validate_target(course_id, node_id):
+    with kb_db.SessionLocal() as db:
+        course = db.get(kb_db.Course, course_id)
+        if course is None:
+            raise HTTPException(404, "课程不存在，请刷新后重新选择")
+        node = db.query(kb_db.Node).join(kb_db.Module).filter(kb_db.Node.id == node_id, kb_db.Module.course_id == course_id).first()
+        if node is None:
+            raise HTTPException(404, "所选知识点不存在或不属于该课程")
+
+
+def stored_file(resource_id):
+    candidates = [Path(UPLOAD_DIR) / filename for filename in os.listdir(UPLOAD_DIR) if filename.startswith(resource_id + ".")]
+    return max(candidates, key=lambda path: path.stat().st_mtime_ns) if candidates else None
+
+
+async def save_upload(file_bytes, filename, course_id, node_id, existing_id=None):
+    validate_target(course_id, node_id)
+    old_id = None
+    if existing_id:
+        with kb_db.SessionLocal() as db:
+            existing = db.query(kb_db.Resource).filter_by(node_id=node_id, dify_document_id=existing_id).first()
+            if existing is None:
+                raise HTTPException(404, "待更新的资料不存在")
+            old_id = existing.dify_document_id
+    document_id = f"local-{uuid.uuid4()}"
+    state = "local"
+    batch = None
+    dataset_id = None
+    if dify.configured():
+        try:
+            dataset_id = await asyncio.to_thread(ensure_dataset, course_id)
+            if old_id and is_remote(old_id):
+                result = await asyncio.to_thread(dify.update_document_by_file, dataset_id, old_id, file_bytes, filename)
+            else:
+                result = await asyncio.to_thread(upload_document, dataset_id, file_bytes, filename, node_id)
+            document_id = result.get("document", {}).get("id")
+            if not document_id or not re.fullmatch(r"[A-Za-z0-9_-]+", document_id):
+                raise dify.DifyError("Dify 未确认文档上传成功，请重试")
+            state = resource_state(result.get("document", {}))
+            batch = result.get("batch")
+        except dify.DifyError as error:
+            raise remote_error(error)
+    extension = Path(filename).suffix or ".bin"
+    (Path(UPLOAD_DIR) / f"{document_id}{extension}").write_bytes(file_bytes)
+    resource = {"id": document_id, "name": filename, "size": len(file_bytes), "status": state, "date": datetime.now().strftime("%Y-%m-%d")}
+    if existing_id:
+        with kb_db.SessionLocal() as db:
+            existing = db.query(kb_db.Resource).filter_by(node_id=node_id, dify_document_id=existing_id).one()
+            existing.dify_document_id = document_id
+            existing.name = filename
+            existing.size = len(file_bytes)
+            existing.status = state
+            existing.created_at = datetime.utcnow()
+            db.commit()
+    else:
+        kb_db.add_resource(node_id, resource)
+    if dataset_id and state == "processing":
+        asyncio.create_task(sync_dify_segments(dataset_id, document_id, node_id, batch))
+    return {"status": "success", "provider": "dify" if dataset_id else "local", "resource": {**resource, "size": f"{len(file_bytes) / 1024:.1f} KB"}}
+
 
 @router.post("/api/kb/upload")
-async def upload_kb_document(
-    file: UploadFile = File(...), 
-    course_id: str = Form(...), 
-    node_id: str = Form(...)
-):
-    dataset_id = kb_db.get_dataset_id_for_course(course_id)
-    if not dataset_id:
-        raise HTTPException(status_code=404, detail="Course or dataset not found")
-        
-    try:
-        file_bytes = await file.read()
-        dify_doc_id = f"mock-dify-{file.filename}"
-        try:
-            res = upload_document(dataset_id, file_bytes, file.filename, node_id)
-            dify_doc_id = res.get("document", {}).get("id", dify_doc_id)
-            # Trigger background sync
-            asyncio.create_task(sync_dify_segments(dataset_id, dify_doc_id, node_id))
-        except Exception as e:
-            print(f"Warning: Dify upload failed: {e}. Falling back to mock ID.")
-            
-        # Save file locally for native viewer
-        file_ext = os.path.splitext(file.filename)[1]
-        local_path = os.path.join(UPLOAD_DIR, f"{dify_doc_id}{file_ext}")
-        with open(local_path, "wb") as f:
-            f.write(file_bytes)
-            
-        new_resource = {
-            "id": dify_doc_id,
-            "name": file.filename,
-            "size": len(file_bytes),
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "status": "completed"
-        }
-        
-        kb_db.add_resource(node_id, new_resource)
-        
-        frontend_resource = {**new_resource}
-        frontend_resource["size"] = f"{len(file_bytes) / 1024:.1f} KB"
-        
-        return {"status": "success", "resource": frontend_resource}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def upload_kb_document(file: UploadFile = File(...), course_id: str = Form(...), node_id: str = Form(...), replace_id: str | None = Form(None)):
+    return await save_upload(await file.read(), file.filename or "document.bin", course_id, node_id, replace_id)
+
+
+@router.post("/api/kb/resources/{node_id}/{document_id}/push-dify")
+async def push_to_dify(node_id: str, document_id: str):
+    if not dify.configured():
+        raise HTTPException(409, "请先配置 Dify 知识库 API 密钥")
+    with kb_db.SessionLocal() as db:
+        resource = db.query(kb_db.Resource).filter_by(node_id=node_id, dify_document_id=document_id).first()
+        if resource is None:
+            raise HTTPException(404, "资料不存在")
+        course_id = resource.node.module.course_id
+        filename = resource.name
+    path = stored_file(document_id)
+    if path is None:
+        raise HTTPException(404, "本地源文件缺失，请重新选择文件上传")
+    return await save_upload(path.read_bytes(), filename, course_id, node_id, document_id)
+
 
 @router.get("/api/kb/download/{resource_id}")
 async def download_kb_document(resource_id: str):
-    db = kb_db.SessionLocal()
-    try:
-        resource = db.query(kb_db.Resource).filter(kb_db.Resource.dify_document_id == resource_id).first()
-        if not resource:
-            raise HTTPException(status_code=404, detail="File not found")
-        
+    with kb_db.SessionLocal() as db:
+        resource = db.query(kb_db.Resource).filter_by(dify_document_id=resource_id).first()
+        if resource is None:
+            raise HTTPException(404, "资料不存在")
         filename = resource.name
-        for f in os.listdir(UPLOAD_DIR):
-            if f.startswith(resource_id):
-                # Try to guess mime type, default to pdf if unknown
-                import mimetypes
-                media_type, _ = mimetypes.guess_type(f)
-                if not media_type:
-                    media_type = "application/pdf"
-                return FileResponse(os.path.join(UPLOAD_DIR, f), filename=filename, content_disposition_type="inline", media_type=media_type)
-        raise HTTPException(status_code=404, detail="File missing on disk")
-    finally:
-        db.close()
+    path = stored_file(resource_id)
+    if path is None:
+        raise HTTPException(404, "本地源文件缺失")
+    return FileResponse(path, filename=filename, media_type=mimetypes.guess_type(filename)[0] or "application/octet-stream", content_disposition_type="inline")
+
 
 @router.delete("/api/kb/resources/{course_id}/{node_id}/{document_id}")
 async def delete_resource_doc(course_id: str, node_id: str, document_id: str):
-    try:
-        dataset_id = kb_db.get_dataset_id_for_course(course_id)
-        if dataset_id and not document_id.startswith("mock"):
-            delete_document(dataset_id, document_id)
-        
-        kb_db.delete_resource(node_id, document_id)
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    validate_target(course_id, node_id)
+    dataset_id = kb_db.get_dataset_id_for_course(course_id)
+    from app.db.models import CourseBuild, GeneratedResource
+    with kb_db.SessionLocal() as db:
+        resource = db.query(kb_db.Resource).filter_by(node_id=node_id, dify_document_id=document_id).first()
+        if resource is None:
+            raise HTTPException(404, "资料不存在")
+        shared = db.query(kb_db.Resource).filter(kb_db.Resource.dify_document_id == document_id, kb_db.Resource.id != resource.id).first() is not None
+        built_course = db.get(CourseBuild, course_id) is not None
+    if dataset_id and dify.configured() and is_remote(document_id) and not shared and not built_course:
+        try:
+            await asyncio.to_thread(delete_document, dataset_id, document_id)
+        except dify.DifyError as error:
+            raise remote_error(error)
+    with kb_db.SessionLocal() as db:
+        for link in db.query(GeneratedResource).filter_by(resource_id=resource.id).all():
+            db.delete(link)
+        current = db.get(kb_db.Resource, resource.id)
+        if current:
+            db.delete(current)
+        db.commit()
+    return {"status": "success"}
+
 
 @router.get("/api/kb/starmap/all")
 async def get_all_starmap():
-    try:
-        nodes = kb_db.get_all_starmap_nodes()
-        return {"data": nodes}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"data": kb_db.get_all_starmap_nodes()}
+
 
 @router.get("/api/kb/starmap/{course_id}")
 async def get_starmap(course_id: str):
+    return {"data": kb_db.get_starmap_nodes(course_id)}
+
+
+def content_cache_path():
+    return Path(__file__).resolve().parents[1] / "resources" / "generated_dify.json"
+
+
+async def generate_content(node_id, kind, more=False):
+    material = await node_materials(node_id)
+    path = content_cache_path()
     try:
-        nodes = kb_db.get_starmap_nodes(course_id)
-        return {"data": nodes}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        cache = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (ValueError, OSError):
+        cache = {}
+    entry = cache.get(node_id, {})
+    if entry.get("source_version") != material["source_version"]:
+        entry = {}
+    if entry.get(kind) and not more:
+        return {kind: entry[kind], "sources": material["sources"], "source_version": material["source_version"]}
+    from app.agents.writer import writer_agent
+    from app.agents.examiner import examiner_agent
+    from app.agents.coder import coder_agent
+    from app.agents.presenter import presenter_agent
+    agents = {
+        "mermaid_schema": ("Writer", writer_agent, "基于提供的 Dify 资料生成知识导图。"),
+        "questions": ("Examiner", examiner_agent, "基于提供的 Dify 资料生成测验题。"),
+        "task": ("Coder", coder_agent, "基于提供的 Dify 资料生成编程练习。"),
+        "presentation": ("Presenter", presenter_agent, "基于提供的 Dify 资料生成讲解课件。"),
+    }
+    name, agent, prompt = agents[kind]
+    deps = AgentDeps(chroma_client=None, student_profile=StudentProfile(), node_id=node_id, node_title=material["title"], knowledge_context=material["context"], knowledge_sources=material["sources"])
+    result = await tracked_run(name, f"Dify 资料生成：{material['title']}", agent.run(prompt + ("请生成一组新的、不同的题目。" if more else ""), deps=deps))
+    output = result.output
+    value = output.model_dump() if kind == "presentation" else getattr(output, kind)
+    if isinstance(value, list):
+        value = [item.model_dump() if hasattr(item, "model_dump") else item for item in value]
+    elif hasattr(value, "model_dump"):
+        value = value.model_dump()
+    if more:
+        value = entry.get(kind, []) + value
+    async with cache_lock:
+        try:
+            current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (ValueError, OSError):
+            current = {}
+        target = current.get(node_id, {})
+        if target.get("source_version") != material["source_version"]:
+            target = {"source_version": material["source_version"]}
+        target[kind] = value
+        current[node_id] = target
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {kind: value, "sources": material["sources"], "source_version": material["source_version"]}
+
 
 @router.get("/api/kb/mermaid/{node_id}")
 async def get_kb_mermaid(node_id: str):
-    """Return a Mermaid schema for a specific node."""
-    import json
-    import os
-    
-    # a. Lookup node title from DB
-    db = kb_db.SessionLocal()
-    node_title = "核心知识"
-    try:
-        node = db.query(kb_db.Node).filter(kb_db.Node.id == node_id).first()
-        if node:
-            node_title = node.title
-        else:
-            mod = db.query(kb_db.Module).filter(kb_db.Module.id == node_id).first()
-            if mod:
-                node_title = mod.title
-            else:
-                course = db.query(kb_db.Course).filter(kb_db.Course.id == node_id).first()
-                if course:
-                    node_title = course.title
-    finally:
-        db.close()
-            
-    # b. Check resources
-    resources = kb_db.get_resources(node_id)
-    if not resources:
-        return {"mermaid_schema": "", "error": "no_resources"}
-
-    # c. Check generated_docs.json with Smart Caching
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    json_path = os.path.join(base_dir, "resources", "generated_docs.json")
-    docs = {}
-    
-    # Fetch max created_at for resources
-    db = kb_db.SessionLocal()
-    max_created_at = None
-    try:
-        from app.db.models import Resource
-        res = db.query(Resource.created_at).filter(Resource.node_id == node_id).order_by(Resource.created_at.desc()).first()
-        if res and res[0]:
-            max_created_at = res[0].isoformat()
-    finally:
-        db.close()
-    
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                docs = json.load(f)
-                if node_id in docs and "mermaid_schema" in docs[node_id] and docs[node_id]["mermaid_schema"]:
-                    last_updated = docs[node_id].get("last_updated")
-                    # If cache exists and is newer than the latest resource upload, return cache
-                    if last_updated and max_created_at and last_updated >= max_created_at:
-                        return {"mermaid_schema": docs[node_id]["mermaid_schema"]}
-                    elif not max_created_at:
-                        return {"mermaid_schema": docs[node_id]["mermaid_schema"]}
-        except Exception as e:
-            print(f"Warning: Failed to read generated_docs.json: {e}")
-
-    # d, e, f. Generate mindmap
-    try:
-        import chromadb
-        from app.agents.writer import writer_agent
-        from app.agents.deps import AgentDeps
-        from app.schemas.profile import StudentProfile
-        
-        try:
-            chroma_client = chromadb.HttpClient(
-                host=os.getenv("CHROMA_HOST", "localhost"), 
-                port=int(os.getenv("CHROMA_PORT", "8001"))
-            )
-        except Exception as e:
-            print(f"Warning: Chroma client failed in kb endpoint: {e}")
-            chroma_client = None
-        deps = AgentDeps(chroma_client=chroma_client, student_profile=StudentProfile(), node_title=node_title)
-        
-        result = await writer_agent.run("Extract a detailed mindmap from the materials.", deps=deps)
-        new_schema = getattr(result, "data", getattr(result, "output", None)).mermaid_schema
-        
-        # g. Update generated_docs.json
-        from datetime import datetime
-        docs[node_id] = docs.get(node_id, {})
-        docs[node_id]["mermaid_schema"] = new_schema
-        docs[node_id]["last_updated"] = datetime.now().isoformat()
-        
-        os.makedirs(os.path.dirname(json_path), exist_ok=True)
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(docs, f, ensure_ascii=False, indent=2)
-            
-        # h. Return the generated schema
-        return {"mermaid_schema": new_schema}
-        
-    except Exception as e:
-        print(f"Error generating mindmap: {e}")
-        return {"mermaid_schema": "", "error": str(e)}
-    finally:
-        from app.utils.telemetry import set_agent_status, log_token_usage
-        import asyncio
-        # We assume writer runs in event loop context here
-        asyncio.create_task(set_agent_status("Writer", "idle"))
-        if 'result' in locals() and hasattr(result, 'usage'):
-            asyncio.create_task(log_token_usage("Writer", result.usage().total_tokens if result.usage() else 500))
+    return await generate_content(node_id, "mermaid_schema")
 
 
 @router.get("/api/kb/quiz/{node_id}")
 async def get_kb_quiz(node_id: str):
-    """Generate a quiz for a specific node."""
-    import json
-    import os
-    from datetime import datetime
-    
-    # a. Lookup node title from DB
-    db = kb_db.SessionLocal()
-    node_title = "核心知识"
-    max_created_at = None
-    try:
-        from app.db.models import Node, Module, Course, Resource
-        node = db.query(Node).filter(Node.id == node_id).first()
-        if node:
-            node_title = node.title
-        else:
-            mod = db.query(Module).filter(Module.id == node_id).first()
-            if mod:
-                node_title = mod.title
-            else:
-                course = db.query(Course).filter(Course.id == node_id).first()
-                if course:
-                    node_title = course.title
-                    
-        # Fetch max created_at for resources
-        res = db.query(Resource.created_at).filter(Resource.node_id == node_id).order_by(Resource.created_at.desc()).first()
-        if res and res[0]:
-            max_created_at = res[0].isoformat()
-    finally:
-        db.close()
-            
-    # b. Check resources
-    resources = kb_db.get_resources(node_id)
-    if not resources:
-        return {"questions": [], "error": "no_resources"}
-
-    # c. Check generated_quizzes.json with Smart Caching
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    json_path = os.path.join(base_dir, "resources", "generated_quizzes.json")
-    docs = {}
-    
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                docs = json.load(f)
-                if node_id in docs and "questions" in docs[node_id] and docs[node_id]["questions"]:
-                    last_updated = docs[node_id].get("last_updated")
-                    if last_updated and max_created_at and last_updated >= max_created_at:
-                        return {"questions": docs[node_id]["questions"]}
-                    elif not max_created_at:
-                        return {"questions": docs[node_id]["questions"]}
-        except Exception as e:
-            print(f"Warning: Failed to read generated_quizzes.json: {e}")
-
-    # d. Generate quiz
-    try:
-        import chromadb
-        from app.agents.examiner import examiner_agent
-        from app.agents.deps import AgentDeps
-        from app.schemas.profile import StudentProfile
-        
-        try:
-            chroma_client = chromadb.HttpClient(
-                host=os.getenv("CHROMA_HOST", "localhost"), 
-                port=int(os.getenv("CHROMA_PORT", "8001"))
-            )
-        except Exception as e:
-            print(f"Warning: Chroma client failed in kb quiz endpoint: {e}")
-            chroma_client = None
-            
-        deps = AgentDeps(chroma_client=chroma_client, student_profile=StudentProfile(), node_title=node_title)
-        
-        result = await examiner_agent.run("Generate a quiz based on the material.", deps=deps)
-        questions_obj = getattr(result, "data", getattr(result, "output", None)).questions
-        # Convert Pydantic models to dict if needed
-        questions = [q.dict() if hasattr(q, "dict") else q for q in questions_obj]
-        
-        # Update cache
-        docs[node_id] = docs.get(node_id, {})
-        docs[node_id]["questions"] = questions
-        docs[node_id]["last_updated"] = datetime.now().isoformat()
-        
-        os.makedirs(os.path.dirname(json_path), exist_ok=True)
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(docs, f, ensure_ascii=False, indent=2)
-            
-        return {"questions": questions}
-        
-    except Exception as e:
-        print(f"Error generating quiz: {e}")
-        return {"questions": [], "error": str(e)}
-    finally:
-        from app.utils.telemetry import set_agent_status, log_token_usage
-        import asyncio
-        asyncio.create_task(set_agent_status("Examiner", "idle"))
-        if 'result' in locals() and hasattr(result, 'usage'):
-            asyncio.create_task(log_token_usage("Examiner", result.usage().total_tokens if result.usage() else 800))
+    return await generate_content(node_id, "questions")
 
 
 @router.post("/api/kb/quiz/{node_id}/more")
 async def get_kb_quiz_more(node_id: str):
-    """Generate more questions for a specific node and append to cache."""
-    import json
-    import os
-    from datetime import datetime
-    
-    db = kb_db.SessionLocal()
-    node_title = "核心知识"
-    try:
-        from app.db.models import Node, Module, Course
-        node = db.query(Node).filter(Node.id == node_id).first()
-        if node:
-            node_title = node.title
-        else:
-            mod = db.query(Module).filter(Module.id == node_id).first()
-            if mod:
-                node_title = mod.title
-            else:
-                course = db.query(Course).filter(Course.id == node_id).first()
-                if course:
-                    node_title = course.title
-    finally:
-        db.close()
-            
-    # Load existing cache
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    json_path = os.path.join(base_dir, "resources", "generated_quizzes.json")
-    docs = {}
-    existing_questions = []
-    
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                docs = json.load(f)
-                if node_id in docs and "questions" in docs[node_id]:
-                    existing_questions = docs[node_id]["questions"]
-        except Exception as e:
-            print(f"Warning: Failed to read generated_quizzes.json: {e}")
+    return await generate_content(node_id, "questions", more=True)
 
-    # Generate more questions
-    try:
-        import chromadb
-        from app.agents.examiner import examiner_agent
-        from app.agents.deps import AgentDeps
-        from app.schemas.profile import StudentProfile
-        
-        try:
-            chroma_client = chromadb.HttpClient(
-                host=os.getenv("CHROMA_HOST", "localhost"), 
-                port=int(os.getenv("CHROMA_PORT", "8001"))
-            )
-        except Exception as e:
-            chroma_client = None
-            
-        deps = AgentDeps(chroma_client=chroma_client, student_profile=StudentProfile(), node_title=node_title)
-        
-        # We can pass an instruction to not repeat existing questions if we want, but for now just call the agent.
-        result = await examiner_agent.run("Generate MORE completely new and different questions based on the material. Ensure they are different from previous questions.", deps=deps)
-        questions_obj = getattr(result, "data", getattr(result, "output", None)).questions
-        new_questions = [q.dict() if hasattr(q, "dict") else q for q in questions_obj]
-        
-        # Append to existing
-        merged_questions = existing_questions + new_questions
-        
-        # Update cache
-        docs[node_id] = docs.get(node_id, {})
-        docs[node_id]["questions"] = merged_questions
-        docs[node_id]["last_updated"] = datetime.now().isoformat()
-        
-        os.makedirs(os.path.dirname(json_path), exist_ok=True)
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(docs, f, ensure_ascii=False, indent=2)
-            
-        return {"questions": merged_questions}
-        
-    except Exception as e:
-        print(f"Error generating more quiz: {e}")
-        return {"questions": existing_questions, "error": str(e)}
 
 @router.get("/api/kb/code/{node_id}")
 async def get_kb_code(node_id: str):
-    """Generate a coding task for a specific node."""
-    import json
-    import os
-    from datetime import datetime
-    
-    # a. Check if node has resources
-    resources = kb_db.get_resources(node_id)
-    if not resources:
-        return {"task": None, "error": "no_resources"}
-        
-    # b. Get node title
-    db = kb_db.SessionLocal()
-    node_title = "核心知识"
-    try:
-        from app.db.models import Node, Module, Course
-        node = db.query(Node).filter(Node.id == node_id).first()
-        if node:
-            node_title = node.title
-        else:
-            mod = db.query(Module).filter(Module.id == node_id).first()
-            if mod:
-                node_title = mod.title
-            else:
-                course = db.query(Course).filter(Course.id == node_id).first()
-                if course:
-                    node_title = course.title
-    finally:
-        db.close()
-            
-    # c. Fetch max created_at for resources (Smart Caching)
-    max_created_at = None
-    for r in resources:
-        try:
-            r_dt = datetime.fromisoformat(r["created_at"])
-            if max_created_at is None or r_dt > max_created_at:
-                max_created_at = r_dt
-        except Exception:
-            pass
-    if max_created_at:
-        max_created_at = max_created_at.isoformat()
-            
-    # d. Check generated_code.json with Smart Caching
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    json_path = os.path.join(base_dir, "resources", "generated_code.json")
-    docs = {}
-    
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                docs = json.load(f)
-                if node_id in docs and "task" in docs[node_id] and docs[node_id]["task"]:
-                    last_updated = docs[node_id].get("last_updated")
-                    if last_updated and max_created_at and last_updated >= max_created_at:
-                        return {"task": docs[node_id]["task"]}
-                    elif not max_created_at:
-                        return {"task": docs[node_id]["task"]}
-        except Exception as e:
-            print(f"Warning: Failed to read generated_code.json: {e}")
-
-    # e. Generate code task
-    try:
-        import chromadb
-        from app.agents.coder import coder_agent
-        from app.agents.deps import AgentDeps
-        from app.schemas.profile import StudentProfile
-        
-        try:
-            chroma_client = chromadb.HttpClient(
-                host=os.getenv("CHROMA_HOST", "localhost"), 
-                port=int(os.getenv("CHROMA_PORT", "8001"))
-            )
-        except Exception as e:
-            print(f"Warning: Chroma client failed in kb code endpoint: {e}")
-            chroma_client = None
-            
-        deps = AgentDeps(chroma_client=chroma_client, student_profile=StudentProfile(), node_title=node_title)
-        
-        result = await coder_agent.run("Generate a code task based on the material.", deps=deps)
-        task_obj = getattr(result, "data", getattr(result, "output", None)).task
-        task = task_obj.dict() if hasattr(task_obj, "dict") else task_obj
-        
-        # Update cache
-        docs[node_id] = docs.get(node_id, {})
-        docs[node_id]["task"] = task
-        docs[node_id]["last_updated"] = datetime.now().isoformat()
-        
-        os.makedirs(os.path.dirname(json_path), exist_ok=True)
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(docs, f, ensure_ascii=False, indent=2)
-            
-        return {"task": task}
-        
-    except Exception as e:
-        print(f"Error generating code task: {e}")
-        return {"task": None, "error": str(e)}
-    finally:
-        from app.utils.telemetry import set_agent_status, log_token_usage
-        import asyncio
-        asyncio.create_task(set_agent_status("Coder", "idle"))
-        if 'result' in locals() and hasattr(result, 'usage'):
-            asyncio.create_task(log_token_usage("Coder", result.usage().total_tokens if result.usage() else 1200))
-
+    return await generate_content(node_id, "task")
 
 
 @router.get("/api/kb/presentation/{node_id}")
 async def get_kb_presentation(node_id: str):
-    node_title = "核心知识"
-    # Find node title if possible
-    # We will just fetch resources directly
-    resources = kb_db.get_resources(node_id)
-    if not resources:
-        return {"error": "no_resources", "presentation": None}
-    
-    # Check if we already have presentation data cached
-    # The cache uses generated_docs.json in app/resources/
-    import json
-    docs_path = "app/resources/generated_docs.json"
-    cache = {}
-    if os.path.exists(docs_path):
-        try:
-            with open(docs_path, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-        except Exception:
-            pass
-            
-    # Key for caching the presentation
-    cache_key = f"{node_id}_presentation"
-    
-    # A simple freshness check could be done using last updated of resources, 
-    # but for prototype we just check if it exists in cache
-    if cache_key in cache:
-        return {"presentation": cache[cache_key]}
-        
-    # Not in cache, so we generate using presenter_agent
-    from app.agents.presenter import presenter_agent, Presentation, Slide
-    from app.agents.deps import AgentDeps
-    from app.schemas.profile import StudentProfile
-    import asyncio
+    return await generate_content(node_id, "presentation")
 
-    try:
-        import chromadb
-        chroma_client = chromadb.HttpClient(
-            host=os.getenv("CHROMA_HOST", "localhost"),
-            port=int(os.getenv("CHROMA_PORT", "8001"))
-        )
-    except Exception as e:
-        print(f"Warning: Chroma client failed in kb presentation endpoint: {e}")
-        chroma_client = None
-    
-    # We call presenter agent
-    try:
-        coro = presenter_agent.run(
-            "Generate a presentation from the materials for this node.",
-            deps=AgentDeps(chroma_client=chroma_client, node_title=node_title)
-        )
-        task_id = task_manager.start_task(coro)
-        try:
-            result = await task_manager._tasks[task_id]
-        except asyncio.CancelledError:
-            return {'error': 'task_cancelled', 'presentation': None}
-        
-        # result.data is PresentationData (Pydantic model)
-        # We need to convert it to dict for caching and returning
-        pres_dict = result.data.model_dump()
-        
-        # Save to cache
-        cache[cache_key] = pres_dict
-        with open(docs_path, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-            
-        return {'presentation': pres_dict}
-        
-    except Exception as e:
-        print('Presenter Agent Error:', str(e))
-        return {'error': str(e), 'presentation': None}
-    finally:
-        from app.utils.telemetry import set_agent_status, log_token_usage
-        import asyncio
-        asyncio.create_task(set_agent_status('Presenter', 'idle'))
-        if 'result' in locals() and hasattr(result, 'usage'):
-            asyncio.create_task(log_token_usage('Presenter', result.usage().total_tokens if hasattr(result, 'usage') and result.usage() else 2000))
 
 @router.post("/api/console/kill")
 async def kill_all_tasks():
-    """Cancels all running AI agent tasks"""
     count = 0
-    for task_id, task in list(task_manager._tasks.items()):
+    for task in list(task_manager._tasks.values()):
         if not task.done():
             task.cancel()
             count += 1

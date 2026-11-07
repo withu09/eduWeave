@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Play, Pause, ChevronLeft, ChevronRight, Volume2, Loader2, Maximize2, Minimize2, Mic } from 'lucide-react';
+import { API_BASE } from "../config";
+import { speakWithBrowserTTS, stopAllSpeech, setGlobalSpeechState } from "../speech";
 
 export interface Slide {
   title: string;
@@ -20,6 +22,7 @@ export function PresentationRenderer({ data }: PresentationRendererProps) {
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [useBrowserTts, setUseBrowserTts] = useState(false);
   const [loadingAudio, setLoadingAudio] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   
@@ -27,19 +30,21 @@ export function PresentationRenderer({ data }: PresentationRendererProps) {
   const slides = data.slides || [];
   const currentSlide = slides[currentSlideIndex];
 
-  const apiBaseUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+  const apiBaseUrl = API_BASE;
 
-  // Fetch TTS audio when slide changes
+  // Fetch TTS audio when slide changes, with automatic browser speechSynthesis fallback
   useEffect(() => {
     if (!currentSlide) return;
     
     let isMounted = true;
     const fetchAudio = async () => {
       setLoadingAudio(true);
+      stopAllSpeech();
       if (audioUrl) {
         URL.revokeObjectURL(audioUrl);
       }
       setAudioUrl(null);
+      setUseBrowserTts(false);
       setIsPlaying(false);
       
       try {
@@ -49,7 +54,7 @@ export function PresentationRenderer({ data }: PresentationRendererProps) {
           body: JSON.stringify({ text: currentSlide.speaker_script })
         });
         
-        if (!response.ok) throw new Error('TTS Failed');
+        if (!response.ok) throw new Error('Cloud TTS unavailable, using Web Speech API');
         
         const blob = await response.blob();
         if (isMounted) {
@@ -59,8 +64,13 @@ export function PresentationRenderer({ data }: PresentationRendererProps) {
             setIsPlaying(true);
           }
         }
-      } catch (error) {
-        console.error("Failed to fetch TTS:", error);
+      } catch {
+        if (isMounted) {
+          setUseBrowserTts(true);
+          if (currentSlideIndex > 0) {
+            setIsPlaying(true);
+          }
+        }
       } finally {
         if (isMounted) setLoadingAudio(false);
       }
@@ -70,23 +80,38 @@ export function PresentationRenderer({ data }: PresentationRendererProps) {
     
     return () => {
       isMounted = false;
+      stopAllSpeech();
       if (audioUrl) URL.revokeObjectURL(audioUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSlideIndex]);
 
   useEffect(() => {
-    if (audioRef.current) {
-      if (isPlaying && audioUrl) {
+    if (audioUrl && audioRef.current) {
+      if (isPlaying) {
+        setGlobalSpeechState(true, "AI 讲解朗读中");
         audioRef.current.play().catch(e => {
           console.error("Playback failed:", e);
           setIsPlaying(false);
+          setGlobalSpeechState(false);
         });
       } else {
         audioRef.current.pause();
+        setGlobalSpeechState(false);
+      }
+    } else if (useBrowserTts && currentSlide) {
+      if (isPlaying) {
+        speakWithBrowserTTS(currentSlide.speaker_script, {
+          label: "AI 讲解朗读中",
+          onEnd: () => handleAudioEnded(),
+          onError: () => setIsPlaying(false),
+        });
+      } else {
+        stopAllSpeech();
       }
     }
-  }, [isPlaying, audioUrl]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, audioUrl, useBrowserTts]);
 
   const togglePlay = () => {
     setIsPlaying(!isPlaying);
@@ -106,6 +131,7 @@ export function PresentationRenderer({ data }: PresentationRendererProps) {
 
   const handleAudioEnded = () => {
     setIsPlaying(false);
+    setGlobalSpeechState(false);
     // Auto-advance to next slide if possible
     if (currentSlideIndex < slides.length - 1) {
       setTimeout(() => {
@@ -212,9 +238,9 @@ export function PresentationRenderer({ data }: PresentationRendererProps) {
             </button>
             <button 
               onClick={togglePlay}
-              disabled={loadingAudio || !audioUrl}
+              disabled={loadingAudio || (!audioUrl && !useBrowserTts)}
               className={`w-12 h-12 flex items-center justify-center rounded-full transition-all shadow-lg ${
-                loadingAudio || !audioUrl 
+                loadingAudio || (!audioUrl && !useBrowserTts)
                   ? 'bg-white/5 text-white/20' 
                   : 'bg-[#8b7dff] hover:bg-[#7a6ce0] text-white shadow-[0_0_15px_rgba(139,125,255,0.3)]'
               }`}
@@ -240,8 +266,10 @@ export function PresentationRenderer({ data }: PresentationRendererProps) {
              {loadingAudio && (
                <span className="text-[12px] text-muted-foreground animate-pulse">正在生成语音...</span>
              )}
-             {audioUrl && !loadingAudio && (
-               <span className="text-[12px] text-[#8b7dff]">语音已准备就绪</span>
+             {(audioUrl || useBrowserTts) && !loadingAudio && (
+               <span className="text-[12px] text-[#8b7dff]">
+                 {isPlaying ? "正在朗读讲稿..." : "语音已准备就绪"}
+               </span>
              )}
           </div>
         </div>
