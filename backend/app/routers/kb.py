@@ -381,8 +381,21 @@ async def download_kb_document(resource_id: str, raw: int = 0):
         filename = resource.name
         dataset_id = resource.node.module.course.dify_dataset_id if resource.node and resource.node.module and resource.node.module.course else None
     path = stored_file(resource_id)
-    if path is not None and path.suffix.lower() in {".md", ".txt"} and not raw:
-        return HTMLResponse(_render_md_html(filename, path.read_text(encoding="utf-8")))
+    is_markdown = filename.lower().endswith((".md", ".txt", ".markdown")) or (path is not None and path.suffix.lower() in {".md", ".txt"})
+    if not raw and is_markdown:
+        if path is not None:
+            try:
+                return HTMLResponse(_render_md_html(filename, path.read_text(encoding="utf-8", errors="replace")))
+            except Exception:
+                pass
+        if dataset_id and dify.configured() and is_remote(resource_id):
+            try:
+                segs = await asyncio.to_thread(dify.get_segments, dataset_id, resource_id, limit=100)
+                text = "\n\n".join(s.get("content", "") for s in segs.get("data", []) if s.get("content"))
+                if text:
+                    return HTMLResponse(_render_md_html(filename, text))
+            except Exception:
+                pass
     if path is None and dataset_id and dify.configured() and is_remote(resource_id):
         try:
             segs = await asyncio.to_thread(dify.get_segments, dataset_id, resource_id, limit=100)
@@ -393,7 +406,9 @@ async def download_kb_document(resource_id: str, raw: int = 0):
             pass
     if path is None:
         raise HTTPException(404, "本地源文件缺失")
-    return FileResponse(path, filename=filename, media_type=mimetypes.guess_type(filename)[0] or "application/octet-stream", content_disposition_type="inline")
+    media_type = "text/markdown; charset=utf-8" if is_markdown else (mimetypes.guess_type(filename)[0] or "application/octet-stream")
+    disposition = "attachment" if raw else "inline"
+    return FileResponse(path, filename=filename, media_type=media_type, content_disposition_type=disposition)
 
 
 @router.delete("/api/kb/resources/{course_id}/{node_id}/{document_id}")

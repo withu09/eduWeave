@@ -6,6 +6,7 @@ import { MermaidRenderer } from "./MermaidRenderer";
 import { QuizRenderer } from "./QuizRenderer";
 import { PracticeRenderer } from "./PracticeRenderer";
 import { PresentationRenderer, PresentationData } from "./PresentationRenderer";
+import { Markdown } from "./Markdown";
 import { API_BASE } from "../config";
 
 type TabKey = 'doc' | 'map' | 'quiz' | 'code' | 'explain';
@@ -27,6 +28,9 @@ export function ResourceCards({ nodeId, onClose, initialTab = 'doc' }: { nodeId:
   const [docs, setDocs] = useState<any[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<any | null>(null);
+  const [docContent, setDocContent] = useState<string>('');
+  const [loadingDocContent, setLoadingDocContent] = useState(false);
+  const [docError, setDocError] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [mapChart, setMapChart] = useState<string>('');
@@ -58,7 +62,31 @@ export function ResourceCards({ nodeId, onClose, initialTab = 'doc' }: { nodeId:
       }
     };
     fetchDocs();
-  }, [nodeId]);
+  }, [nodeId, apiBaseUrl]);
+
+  // Fetch selected doc content
+  useEffect(() => {
+    if (!selectedDoc) {
+      setDocContent('');
+      return;
+    }
+    const fetchDocContent = async () => {
+      setLoadingDocContent(true);
+      setDocError(null);
+      try {
+        const res = await fetch(`${apiBaseUrl}/api/kb/download/${selectedDoc.id}`);
+        if (!res.ok) throw new Error(`无法获取讲义 (${res.status})`);
+        const text = await res.text();
+        setDocContent(text);
+      } catch (e) {
+        console.error("Failed to load doc content:", e);
+        setDocError(e instanceof Error ? e.message : "获取讲义失败");
+      } finally {
+        setLoadingDocContent(false);
+      }
+    };
+    fetchDocContent();
+  }, [selectedDoc?.id, apiBaseUrl]);
 
   useEffect(() => {
     if (activeTab !== 'map') return;
@@ -197,12 +225,36 @@ export function ResourceCards({ nodeId, onClose, initialTab = 'doc' }: { nodeId:
                         ))}
                       </div>
                       <div className={isFullscreen ? "fixed inset-0 z-[100] bg-[#070815] flex flex-col items-center justify-center text-center overflow-hidden" : "w-3/4 rounded-lg bg-[#070815] border border-[rgba(140,150,220,0.18)] flex flex-col items-center justify-center text-center relative overflow-hidden"}>
-                        {selectedDoc ? (
-                          <iframe 
-                            src={`${apiBaseUrl}/api/kb/download/${selectedDoc.id}`} 
-                            className="w-full h-full bg-white"
-                            title={selectedDoc.name}
-                          />
+                        {loadingDocContent ? (
+                          <div className="flex-1 flex flex-col items-center justify-center gap-2">
+                            <Loader2 className="h-6 w-6 animate-spin text-[#8b7dff]" />
+                            <span className="text-xs text-muted-foreground">正在加载讲义资料...</span>
+                          </div>
+                        ) : docError ? (
+                          <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+                            <p className="text-sm text-red-400">{docError}</p>
+                          </div>
+                        ) : docContent ? (
+                          docContent.trim().startsWith("<!DOCTYPE") || docContent.trim().startsWith("<html") ? (
+                            <iframe 
+                              srcDoc={docContent}
+                              className="w-full h-full border-0 bg-[#070815]"
+                              title={selectedDoc?.name || "讲义预览"}
+                              sandbox="allow-scripts allow-same-origin"
+                            />
+                          ) : (
+                            <div className="w-full h-full overflow-y-auto p-6 text-left">
+                              <div className="max-w-3xl mx-auto space-y-4">
+                                <div className="flex items-center gap-2 pb-3 border-b border-[rgba(140,150,220,0.18)]">
+                                  <span className="inline-block px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[#8b7dff]/20 text-[#a78bfa] border border-[#8b7dff]/30">
+                                    Dify 云端权威教材切片 · 溯源讲义
+                                  </span>
+                                  <span className="text-xs text-muted-foreground truncate">{selectedDoc?.name}</span>
+                                </div>
+                                <Markdown>{docContent}</Markdown>
+                              </div>
+                            </div>
+                          )
                         ) : (
                           <>
                             <FileType2 className="h-12 w-12 text-[#8b7dff]/50 mb-3" />
@@ -220,8 +272,8 @@ export function ResourceCards({ nodeId, onClose, initialTab = 'doc' }: { nodeId:
                             </button>
                           )}
                           <a 
-                            href={selectedDoc ? `${apiBaseUrl}/api/kb/download/${selectedDoc.id}` : '#'} 
-                            download
+                            href={selectedDoc ? `${apiBaseUrl}/api/kb/download/${selectedDoc.id}?raw=1` : '#'} 
+                            download={selectedDoc?.name || true}
                             className="flex items-center gap-2 px-3 h-8 bg-[#0a0c1a]/80 backdrop-blur border border-[#8b7dff]/30 text-[#8b7dff] rounded-lg text-[11px] transition hover:bg-[#8b7dff]/20 shadow-lg"
                           >
                             <Download className="h-3 w-3" /> 下载源文件
