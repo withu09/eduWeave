@@ -247,8 +247,8 @@ export interface CommunityPost {
 
 // 从正文中解析 #标题 (无空格的 # 视为标签,与 Markdown 标题 "# " 区分)
 export function parseTags(markdown: string): string[] {
-  const matches = markdown.match(/(?:^|\s)#([^\s#]+)/g) ?? [];
-  return Array.from(new Set(matches.map((m) => m.trim().replace(/^#/, ""))));
+  const matches = markdown.match(/(?:^|\s)#([^\s#.,，。!！?？:：;；]+)/g) ?? [];
+  return Array.from(new Set(matches.map((m) => m.trim().replace(/^#/, "").slice(0, 32)))).slice(0, 10);
 }
 
 export const communityPosts: CommunityPost[] = [

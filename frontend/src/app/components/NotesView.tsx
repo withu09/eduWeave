@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { NotebookPen, Calendar, Network, Tag, Sparkles, FileQuestion, Plus, Pencil, Trash2, X, Eye, Check } from "lucide-react";
 import { notes as seedNotes, type Note } from "../data";
 import { useStudyStore } from "../store";
 import { Markdown } from "./Markdown";
+import { normalizeNoteMath } from "../noteMath";
 
 type Tab = "timeline" | "graph" | "tags";
 
@@ -74,20 +75,24 @@ function NoteModal({
     >
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
       <motion.div
-        className="relative z-10 flex w-full max-w-2xl flex-col gap-4 rounded-2xl border border-border bg-card p-6 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="note-editor-title"
+        className="relative z-10 flex max-h-[90vh] w-full max-w-2xl flex-col gap-4 overflow-y-auto rounded-2xl border border-border bg-card p-6 shadow-2xl"
         initial={{ scale: 0.95, y: 20 }}
         animate={{ scale: 1, y: 0 }}
         exit={{ scale: 0.95, y: 20 }}
         transition={{ type: "spring", stiffness: 300, damping: 28 }}
       >
         <div className="flex items-center justify-between">
-          <h3 className="text-[16px]">{initial ? "编辑笔记" : "新建笔记"}</h3>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground transition hover:bg-secondary hover:text-foreground">
+          <h3 id="note-editor-title" className="text-[16px]">{initial ? "编辑笔记" : "新建笔记"}</h3>
+          <button aria-label="关闭笔记编辑器" onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground transition hover:bg-secondary hover:text-foreground">
             <X className="h-4 w-4" />
           </button>
         </div>
 
         <input
+          aria-label="笔记标题"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="笔记标题…"
@@ -123,10 +128,11 @@ function NoteModal({
 
         {preview ? (
           <div className="min-h-[140px] rounded-xl border border-border bg-input-background p-3">
-            {body.trim() ? <Markdown>{body}</Markdown> : <span className="text-[12px] text-muted-foreground">暂无内容</span>}
+            {body.trim() ? <NoteContent text={body} /> : <span className="text-[12px] text-muted-foreground">暂无内容</span>}
           </div>
         ) : (
           <textarea
+            aria-label="笔记正文"
             value={body}
             onChange={(e) => setBody(e.target.value)}
             rows={6}
@@ -161,6 +167,7 @@ export function NotesView({ onAskAI }: { onAskAI?: (prompt: string) => void }) {
   const [notes, setNotes] = useState<Note[]>(loadNotes);
   const [tab, setTab] = useState<Tab>("timeline");
   const [modal, setModal] = useState<{ mode: "new" | "edit"; note?: Note } | null>(null);
+  const [reading, setReading] = useState<Note | null>(null);
   const constellation = useStudyStore((state) => state.constellation);
 
   useEffect(() => {
@@ -273,18 +280,28 @@ export function NotesView({ onAskAI }: { onAskAI?: (prompt: string) => void }) {
               {notes.map((n, i) => (
                 <motion.div
                   key={n.id}
+                  data-note-id={n.id}
                   layout
                   initial={{ opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, scale: 0.96 }}
                   transition={{ delay: i * 0.04 }}
-                  className="group rounded-2xl border border-border bg-card p-4 backdrop-blur-xl transition hover:border-[var(--primary)]"
+                  className="group min-w-0 rounded-2xl border border-border bg-card p-4 backdrop-blur-xl transition hover:border-[var(--primary)]"
                 >
                   <div className="mb-1.5 flex items-start justify-between gap-2">
                     <span className="text-[14px] leading-snug">{n.title}</span>
                     <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{n.date}</span>
                   </div>
-                  <p className="line-clamp-3 text-[12px] leading-relaxed text-muted-foreground">{n.excerpt}</p>
+                  <div className="max-h-44 overflow-y-auto py-1">
+                    <NoteContent text={n.excerpt} />
+                  </div>
+                  <button
+                    onClick={() => setReading(n)}
+                    className="mt-2 flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-primary transition hover:bg-secondary"
+                    aria-label={`阅读全文：${n.title}`}
+                  >
+                    <Eye className="h-3 w-3" /> 阅读全文
+                  </button>
                   <div className="mt-3 flex flex-wrap items-center gap-1.5">
                     {n.tags.map((t) => (
                       <span key={t} className="rounded-md bg-secondary/50 px-1.5 py-0.5 font-mono text-[9px] text-[var(--primary)]">#{t}</span>
@@ -327,8 +344,35 @@ export function NotesView({ onAskAI }: { onAskAI?: (prompt: string) => void }) {
           />
         )}
       </AnimatePresence>
+      {reading && <NoteReader note={reading} onClose={() => setReading(null)} onEdit={() => { setModal({ mode: "edit", note: reading }); setReading(null); }} />}
     </div>
   );
+}
+
+function NoteContent({ text }: { text: string }) {
+  return <div className="min-w-0 max-w-full overflow-x-auto break-words [&_.katex]:whitespace-nowrap [&_.katex-display]:max-w-full [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1 [&_.markdown-body]:min-w-0 [&_.markdown-body]:max-w-full">
+    <Markdown>{normalizeNoteMath(text)}</Markdown>
+  </div>;
+}
+
+function NoteReader({ note, onClose, onEdit }: { note: Note; onClose: () => void; onEdit: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => { const dialog = dialogRef.current!; dialog.showModal(); return () => dialog.close(); }, []);
+  return <dialog
+    ref={dialogRef}
+    aria-labelledby="note-reader-title"
+    onCancel={onClose}
+    onClick={event => { if (event.target === event.currentTarget) onClose(); }}
+    className="max-h-[90vh] w-[calc(100%_-_2rem)] max-w-3xl overflow-y-auto rounded-2xl border border-border bg-card p-5 text-foreground shadow-2xl backdrop:bg-black/50"
+  >
+    <div className="mb-2 flex items-start justify-between gap-3">
+      <h3 id="note-reader-title" className="min-w-0 break-words text-base font-medium">{note.title}</h3>
+      <button autoFocus aria-label="关闭笔记全文" onClick={onClose} className="shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-secondary"><X className="h-4 w-4" /></button>
+    </div>
+    <p className="mb-4 text-xs text-muted-foreground">{note.chapter} · {note.date}</p>
+    <NoteContent text={note.excerpt} />
+    <div className="mt-5 flex justify-end"><button onClick={onEdit} className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-xs hover:bg-secondary"><Pencil className="h-3.5 w-3.5" />编辑这条笔记</button></div>
+  </dialog>;
 }
 
 function TabBtn({ on, onClick, icon: Icon, label }: { on: boolean; onClick: () => void; icon: typeof Calendar; label: string }) {

@@ -62,6 +62,7 @@ backend/chromadb/
 backend/chroma.log
 backend/eduweave_kb.db
 backend/*.db
+/backend/seed_dump.sql
 backend/app/resources/generated_*.json
 .local-build/
 *.sqlite
@@ -92,4 +93,5 @@ desktop.ini
 *.tar.gz
 *.pptx
 *.pdf
+/*.mp4
 server_init.sh

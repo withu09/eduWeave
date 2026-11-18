@@ -30,6 +30,7 @@ EduWeave AI 把「问一句」变成「一条学习路径」：用户以自然�
 | 能力 | 说明 | 主要入口 |
 | --- | --- | --- |
 | AI 学习对话 | 携带同一会话历史，SSE 流式回复 | `POST /api/chat` |
+| 学习社区 | 共享动态、图片、评论回复、点赞收藏、搜索和个人内容管理 | `/api/community/*` |
 | 学情画像 | 从对话中实时抽取知识点掌握度与薄弱项 | Profiler Agent |
 | 学习路径规划 | 将目标拆解为有序知识节点 | Chat Agent → `recommend_plan` |
 | 知识库管理 | 课程 / 模块 / 节点三级树，Dify 双向同步 | `/api/kb/*` |
@@ -292,6 +293,7 @@ npm run dev
 | [docs/架构设计.md](docs/架构设计.md) | 分层架构、Agent 协作、数据流 |
 | [docs/API接口.md](docs/API接口.md) | 全部接口的请求/响应说明 |
 | [docs/开发指南.md](docs/开发指南.md) | 本地开发、调试、扩展 Agent 的方法 |
+| [docs/社区功能与更新说明.md](docs/社区功能与更新说明.md) | 社区功能、服务器更新包、身份与数据存储、验证与回退 |
 | [backend/README.md](backend/README.md) | 后端模块索引 |
 | [frontend/README.md](frontend/README.md) | 前端组件与视图说明 |
 

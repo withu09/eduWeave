@@ -16,7 +16,7 @@ import { API_BASE } from "./config";
 import { useSpeechState, stopAllSpeech } from "./speech";
 
 export default function App() {
-  const [view, setView] = useState<ViewKey>("canvas");
+  const [view, setView] = useState<ViewKey>(() => new URLSearchParams(window.location.search).has("community_post") || window.location.hash === "#community" ? "community" : "canvas");
   const [selected, setSelected] = useState<string | null>(null);
   const [studyNode, setStudyNode] = useState<{ id: string; tab: "doc" | "quiz" } | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);

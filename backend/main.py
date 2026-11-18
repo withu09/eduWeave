@@ -25,6 +25,7 @@ from app.routers.adaptive import router as adaptive_router
 from app.routers.practice import router as practice_router
 from app.routers.console import router as console_router
 from app.routers.course_build import router as course_build_router
+from app.routers.community import router as community_router
 from app.utils.telemetry import tracked_run, agent_call
 
 # Initialize Chroma client
@@ -115,6 +116,7 @@ app.include_router(adaptive_router)
 app.include_router(practice_router)
 app.include_router(console_router)
 app.include_router(course_build_router)
+app.include_router(community_router)
 
 @app.get("/api/health")
 async def health():

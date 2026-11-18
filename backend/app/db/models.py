@@ -1,5 +1,5 @@
-from sqlalchemy import Column, String, Integer, ForeignKey, DateTime, Text, Boolean, UniqueConstraint
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy import Column, String, Integer, ForeignKey, DateTime, Text, Boolean, UniqueConstraint, LargeBinary
+from sqlalchemy.orm import declarative_base, deferred, relationship
 import datetime
 import uuid
 
@@ -105,3 +105,54 @@ class GeneratedResource(Base):
     __tablename__ = "generated_resources"
     resource_id = Column(String, ForeignKey("resources.id", ondelete="CASCADE"), primary_key=True)
     course_id = Column(String, ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True)
+
+
+class CommunityMember(Base):
+    __tablename__ = "community_members"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    nickname = Column(String(24), nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
+class CommunityPost(Base):
+    __tablename__ = "community_posts"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    author_id = Column(String, ForeignKey("community_members.id"), nullable=False, index=True)
+    markdown = Column(Text, nullable=False)
+    tags = Column(Text, default="[]", nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    author = relationship("CommunityMember")
+    images = relationship("CommunityImage", cascade="all, delete-orphan", order_by="CommunityImage.position")
+    comments = relationship("CommunityComment", cascade="all, delete-orphan")
+    reactions = relationship("CommunityReaction", cascade="all, delete-orphan")
+
+
+class CommunityImage(Base):
+    __tablename__ = "community_images"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    author_id = Column(String, ForeignKey("community_members.id"), nullable=False, index=True)
+    post_id = Column(String, ForeignKey("community_posts.id", ondelete="CASCADE"), nullable=True, index=True)
+    position = Column(Integer, default=0, nullable=False)
+    data = deferred(Column(LargeBinary, nullable=False))
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
+class CommunityComment(Base):
+    __tablename__ = "community_comments"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    post_id = Column(String, ForeignKey("community_posts.id", ondelete="CASCADE"), nullable=False, index=True)
+    author_id = Column(String, ForeignKey("community_members.id"), nullable=False)
+    parent_id = Column(String, ForeignKey("community_comments.id"), nullable=True)
+    markdown = Column(Text, nullable=False)
+    deleted = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    author = relationship("CommunityMember")
+
+
+class CommunityReaction(Base):
+    __tablename__ = "community_reactions"
+    post_id = Column(String, ForeignKey("community_posts.id", ondelete="CASCADE"), primary_key=True)
+    member_id = Column(String, ForeignKey("community_members.id"), primary_key=True)
+    kind = Column(String(10), primary_key=True)
